@@ -89,4 +89,4 @@ Formal citation information will be added once the paper and its bibliographic d
 
 ## Status
 
-This repository is being prepared as a public-facing software artifact. The current public-facing documentation is intentionally compact and product-oriented.
+This repository serves as the release-oriented software artifact associated with the paper. Its public-facing documentation is intentionally compact and focused on technical review and practical reuse.
