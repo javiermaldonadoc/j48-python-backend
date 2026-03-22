@@ -2,6 +2,8 @@
 
 This repository is intended to serve as the public software artifact associated with the paper.
 
+The current paper-facing artifact snapshot is version `0.1.0`.
+
 ## What this repository supports directly
 
 This repository supports direct inspection and reuse of:
@@ -25,7 +27,7 @@ The intended reproduction model is:
 
 1. obtain the required datasets from their original sources,
 2. prepare them locally in the formats expected by the evaluation scripts,
-3. run the released code and paper-facing evaluation workflow from a clean environment,
+3. run the released code for artifact version `0.1.0` and the paper-facing evaluation workflow from a clean environment,
 4. compare the resulting outputs with the claims summarized in the paper.
 
 ## Public-facing evidence scope

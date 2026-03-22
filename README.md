@@ -87,6 +87,12 @@ See [DATA_AVAILABILITY.md](DATA_AVAILABILITY.md) for the repository-level data a
 
 Formal citation information will be added once the paper and its bibliographic details are publicly available.
 
+## Artifact version
+
+Current public artifact version: `0.1.0`.
+
+This version is the paper-facing release snapshot used to expose the software artifact for technical review and practical reuse.
+
 ## Status
 
 This repository serves as the release-oriented software artifact associated with the paper. Its public-facing documentation is intentionally compact and focused on technical review and practical reuse.
