@@ -31,8 +31,8 @@ _NOMINAL_OTHER_BRANCH = "__WEKA_OTHER__"
 
 def _to_python_scalar(value: Any) -> Any:
     """
-    Convierte escalares numpy/bytes a tipos Python simples para comparaciones,
-    exportación JSON y manejo consistente de atributos nominales.
+    Convert NumPy scalars and bytes to plain Python types for comparisons,
+    JSON export, and consistent nominal-attribute handling.
     """
     if isinstance(value, np.generic):
         value = value.item()
@@ -46,7 +46,7 @@ def _to_python_scalar(value: Any) -> Any:
 
 def _is_missing_scalar(value: Any) -> bool:
     """
-    Detecta valores faltantes de forma robusta para columnas numéricas u object.
+    Detect missing values robustly for numeric and object columns.
     """
     value = _to_python_scalar(value)
     if value is None:
@@ -60,7 +60,7 @@ def _is_missing_scalar(value: Any) -> bool:
 
 def _to_jsonable(value: Any) -> Any:
     """
-    Convierte valores internos a formas simples y serializables.
+    Convert internal values to simple serializable forms.
     """
     value = _to_python_scalar(value)
     if isinstance(value, (float, np.floating)) and not np.isfinite(value):
@@ -70,22 +70,23 @@ def _to_jsonable(value: Any) -> Any:
 
 def _entropy(y: np.ndarray) -> float:
     """
-    Calcula la entropía H(Y) de un array de etiquetas.
-    
-    Optimización: usa bincount para arrays de enteros, que es más rápido que unique().
-    
+    Compute the entropy $H(Y)$ of a label array.
+
+    Optimization: uses `bincount` for integer arrays, which is faster than
+    `unique()`.
+
     Args:
-        y: Array de etiquetas (enteros codificados)
-        
+        y: Label array with integer-encoded classes.
+
     Returns:
-        Entropía en bits (base 2)
+        Entropy in bits (base 2).
     """
     if y.size == 0:
         return 0.0
     
-    # bincount es ~2x más rápido que unique para enteros
+    # bincount is about 2x faster than unique for integer arrays.
     counts = np.bincount(y)
-    counts = counts[counts > 0]  # Filtrar ceros
+    counts = counts[counts > 0]  # Filter out zero counts.
     
     if counts.size <= 1:
         return 0.0
@@ -96,15 +97,15 @@ def _entropy(y: np.ndarray) -> float:
 
 def _entropy_from_counts_fast(counts: np.ndarray, total: int, log2_lut: np.ndarray) -> float:
     """
-    Entropía H(Y) a partir de conteos por clase usando:
+        Compute entropy $H(Y)$ from per-class counts using:
       H = log2(total) - (1/total) * sum_i c_i * log2(c_i)
 
-    Usa una tabla precomputada de log2 para evitar recalcular logaritmos
-    miles de veces durante la búsqueda de splits.
+        Uses a precomputed `log2` lookup table to avoid recalculating logarithms
+        thousands of times during split search.
     """
     if total <= 1:
         return 0.0
-    # log2(0) se trata como 0 porque c_i * log2(c_i) = 0 cuando c_i = 0.
+    # Treat log2(0) as 0 because c_i * log2(c_i) = 0 when c_i = 0.
     c_log_c = float(np.dot(counts, log2_lut[counts]))
     return float(log2_lut[total] - (c_log_c / total))
 
@@ -116,19 +117,19 @@ def _gain_ratio(
     base_entropy: Optional[float] = None,
 ) -> float:
     """
-    Calcula el Gain Ratio (C4.5) = Information Gain / Intrinsic Value.
-    
-    El Gain Ratio corrige el sesgo de Information Gain hacia atributos con muchos valores,
-    penalizando splits que crean muchas particiones pequeñas.
-    
+    Compute the Gain Ratio (C4.5) = Information Gain / Intrinsic Value.
+
+    Gain Ratio corrects the Information Gain bias toward attributes with many
+    values by penalizing splits that create many small partitions.
+
     Args:
-        y: Etiquetas del nodo padre
-        y_left: Etiquetas del hijo izquierdo
-        y_right: Etiquetas del hijo derecho
-        base_entropy: Entropía precalculada del padre (opcional)
-        
+        y: Labels at the parent node.
+        y_left: Labels at the left child.
+        y_right: Labels at the right child.
+        base_entropy: Precomputed parent entropy, if available.
+
     Returns:
-        Gain Ratio (mayor es mejor)
+        Gain Ratio, where larger is better.
     """
     n = y.size
     if n == 0:
@@ -140,7 +141,7 @@ def _gain_ratio(
     n_left = y_left.size
     n_right = y_right.size
 
-    # No permitir splits vacíos
+    # Do not allow empty splits.
     if n_left == 0 or n_right == 0:
         return 0.0
 
@@ -149,7 +150,7 @@ def _gain_ratio(
     h_right = _entropy(y_right)
     info_gain = base_entropy - (n_left / n) * h_left - (n_right / n) * h_right
 
-    # Intrinsic Value (penaliza splits desbalanceados)
+    # Intrinsic Value penalizes unbalanced splits.
     p_left = n_left / n
     p_right = n_right / n
     intrinsic_value = 0.0
@@ -159,7 +160,7 @@ def _gain_ratio(
     if p_right > 0:
         intrinsic_value -= p_right * np.log2(p_right)
 
-    # Evitar división por cero
+    # Avoid division by zero.
     if intrinsic_value == 0.0:
         return 0.0
 
@@ -168,10 +169,10 @@ def _gain_ratio(
 
 def _entropy_from_weighted_counts(counts: np.ndarray) -> float:
     """
-    Entropía a partir de conteos ponderados por clase.
+    Entropy from weighted per-class counts.
 
-    A diferencia de `_entropy_from_counts_fast`, esta versión acepta conteos
-    fraccionales, necesarios cuando se propagan instancias con pesos.
+    Unlike `_entropy_from_counts_fast`, this version accepts fractional
+    counts, which are needed when weighted instances are propagated.
     """
     counts = np.asarray(counts, dtype=np.float64)
     total = float(np.sum(counts))
@@ -188,10 +189,10 @@ def _entropy_from_weighted_counts(counts: np.ndarray) -> float:
 
 def _entropy_from_weighted_counts_matrix(counts: np.ndarray) -> np.ndarray:
     """
-    Entropía por fila para una matriz de conteos ponderados por clase.
+    Row-wise entropy for a matrix of weighted per-class counts.
 
-    Mantiene la misma semántica que `_entropy_from_weighted_counts`, pero evita
-    el loop Python cuando se evalúan muchos thresholds numéricos en bloque.
+    Preserves the same semantics as `_entropy_from_weighted_counts`, but
+    avoids a Python loop when evaluating many numeric thresholds in batch.
     """
     counts = np.asarray(counts, dtype=np.float64)
     if counts.ndim != 2:
@@ -214,10 +215,9 @@ def _entropy_from_weighted_counts_matrix(counts: np.ndarray) -> np.ndarray:
 
 def _binary_entropy_from_positive_weight(positive_weight: np.ndarray, total_weight: np.ndarray) -> np.ndarray:
     """
-    Entropía binaria vectorizada a partir del peso de la clase positiva y el
-    peso total de cada fila.
+    Vectorized binary entropy from positive-class weight and total row weight.
 
-    Se usa para acelerar la evaluación de thresholds numéricos en problemas
+    Used to accelerate numeric-threshold evaluation in binary problems.
     binarios, evitando construir una matriz one-hot completa.
     """
     positive_weight = np.asarray(positive_weight, dtype=np.float64)
@@ -758,16 +758,16 @@ def warmup_numba_numeric_kernel() -> None:
 @dataclass
 class _Node:
     """
-    Nodo del árbol C4.5 (interno o hoja).
-    
+    C4.5 tree node (internal node or leaf).
+
     Attributes:
-        is_leaf: Si es nodo hoja (True) o interno (False)
-        prediction: Clase mayoritaria en este nodo
-        feature_index: Índice del feature para split (solo nodos internos)
-        threshold: Valor de corte para split (solo nodos internos)
-        left: Hijo izquierdo (x[feature_index] <= threshold)
-        right: Hijo derecho (x[feature_index] > threshold)
-        class_counts: Distribución ponderada de clases en este nodo
+        is_leaf: Whether this is a leaf node (True) or an internal node (False).
+        prediction: Majority class at this node.
+        feature_index: Feature index used for the split (internal nodes only).
+        threshold: Split threshold (internal numeric nodes only).
+        left: Left child (`x[feature_index] <= threshold`).
+        right: Right child (`x[feature_index] > threshold`).
+        class_counts: Weighted class distribution at this node.
     """
     is_leaf: bool
     prediction: Optional[Any] = None
@@ -800,128 +800,128 @@ class _Node:
 
 class C45TreeClassifier:
     """
-    Implementación optimizada del algoritmo C4.5 (Quinlan, 1993).
-    
-    Características principales:
-    - Usa Gain Ratio en lugar de Information Gain para evitar sesgo
-    - Maneja atributos continuos mediante binarización dinámica
-    - Predicción vectorizada para mejor rendimiento
-    - API compatible con scikit-learn
-    
-    Optimizaciones implementadas:
-    - Cálculo de entropía con bincount (~2x más rápido)
-    - Predicción vectorizada por lotes (~3-5x más rápido)
-    - Límite opcional de candidatos de threshold (hasta 10x más rápido)
-    - Conversión a float32 para reducir memoria
+    Optimized implementation of the C4.5 algorithm (Quinlan, 1993).
+
+    Main characteristics:
+    - Uses Gain Ratio instead of Information Gain to avoid bias.
+    - Handles continuous attributes through dynamic binarization.
+    - Uses vectorized prediction for better performance.
+    - Exposes a scikit-learn-compatible API.
+
+    Implemented optimizations:
+    - Entropy computation with bincount (about 2x faster).
+    - Vectorized batch prediction (about 3-5x faster).
+    - Optional cap on threshold candidates (up to 10x faster).
+    - Float32 conversion to reduce memory use.
     
     Parameters
     ----------
     min_samples_split : int, default=2
-        Número mínimo de muestras requeridas para dividir un nodo interno.
+        Minimum number of samples required to split an internal node.
         
     min_samples_leaf : int, default=1
-        Número mínimo de muestras requeridas en cada hoja.
+        Minimum number of samples required in each leaf.
         
     max_depth : int, optional
-        Profundidad máxima del árbol. Si None, crece hasta que las hojas sean puras
-        o cumplan min_samples_split/min_samples_leaf.
+        Maximum tree depth. If None, the tree grows until the leaves are pure
+        or the min_samples_split/min_samples_leaf constraints stop growth.
         
     min_gain_ratio : float, default=1e-6
-        Gain ratio mínimo requerido para hacer un split.
-        Splits con gain ratio menor se descartan (poda temprana).
+        Minimum gain ratio required to accept a split.
+        Splits below this gain ratio are discarded early.
 
     use_gain_prefilter : bool, default=False
-        Si True, aplica un pre-filtro estilo C4.5: entre los mejores candidatos
-        por atributo, solo compiten aquellos con information gain ajustado mayor
-        o igual al promedio del nodo.
+        If True, applies a C4.5-style prefilter: among the best candidate for
+        each attribute, only those with adjusted information gain greater than
+        or equal to the node average are allowed to compete.
 
     use_mdl_correction : bool, default=False
-        Si True, aplica una penalización MDL aproximada para atributos numéricos
-        en la evaluación de split:
+                If True, applies an approximate MDL penalty for numeric attributes
+                during split evaluation:
           gain_adj = gain - log2(num_candidate_splits) / n_samples
 
     enable_pruning : bool, default=False
-        Si True, aplica post-poda tipo C4.5 (pessimistic/confidence-based).
+        If True, applies C4.5-style post-pruning (pessimistic/confidence-based).
 
     reduced_error_pruning : bool, default=False
-        Si True, usa reduced-error pruning con una partición hold-out del
-        entrenamiento en lugar de la post-poda pesimista basada en confianza.
+        If True, uses reduced-error pruning with a hold-out split from the
+        training data instead of confidence-based pessimistic post-pruning.
 
     num_folds : int, default=3
-        Número de folds usados por reduced-error pruning. Un fold se reserva
-        para poda y el resto se usa para crecer el árbol.
+        Number of folds used by reduced-error pruning. One fold is reserved
+        for pruning and the rest are used to grow the tree.
 
     confidence_factor : float, default=0.25
-        Parámetro de confianza para poda pessimistic (análogo a J48 -C).
+        Confidence parameter for pessimistic pruning (analogous to J48 `-C`).
 
     collapse_tree : bool, default=True
-        Si True, permite colapsar subárboles a hoja cuando el error estimado de
-        la hoja no es peor que el del subárbol.
+        If True, allows collapsing subtrees into a leaf when the leaf's
+        estimated error is no worse than the subtree's error.
 
     enable_subtree_raising : bool, default=False
-        Si True, aplica una aproximación de subtree raising durante post-poda.
+        If True, applies an approximation of subtree raising during post-pruning.
 
     enable_fractional_missing : bool, default=False
-        Si True, usa propagación fraccional determinista para valores faltantes
-        (NaN), en línea con la semántica ponderada documentada por WEKA J48.
+        If True, uses deterministic fractional propagation for missing values
+        (`NaN`), in line with the weighted semantics documented by WEKA J48.
 
     make_split_point_actual_value : bool, default=False
-        Si True, usa como umbral el valor real observado en el borde del split
-        (estilo J48 por defecto), en lugar del punto medio.
+        If True, uses the observed value at the split boundary as the threshold
+        (the default J48 style) instead of the midpoint.
 
     use_laplace : bool, default=False
-        Si True, aplica suavizado de Laplace al estimar probabilidades de clase
-        en hojas, análogo a la opción `-A` de WEKA J48.
+        If True, applies Laplace smoothing when estimating leaf class
+        probabilities, analogous to the WEKA J48 `-A` option.
 
     nominal_features : list[int], optional
-        Índices de columnas que deben tratarse como nominales. Para ellas se
-        generan splits multi-way por valor observado, alineados con el
-        comportamiento nominal por defecto de J48.
+        Column indices that should be treated as nominal. For them, multi-way
+        splits are created by observed value, aligned with J48's default
+        nominal behavior.
 
     binary_splits : bool, default=False
-        Si True, los atributos nominales se evalúan con divisiones binarias
-        estilo J48 `-B`, usando la mejor partición one-vs-rest por valor.
+        If True, nominal attributes are evaluated with J48 `-B`-style binary
+        splits, using the best one-vs-rest partition per value.
 
     auto_detect_nominal : bool, default=False
-        Si True, intenta inferir columnas nominales a partir de valores no
-        numéricos cuando no se declaran explícitamente en `nominal_features`.
+        If True, attempts to infer nominal columns from non-numeric values when
+        they are not declared explicitly in `nominal_features`.
 
     nominal_value_domains : dict, optional
-        Dominios nominales explícitos por atributo. Las claves pueden ser
-        índices de columna o nombres de atributo, y los valores deben ser la
-        lista ordenada de categorías admitidas. Esto permite reproducir mejor
-        datasets tipo ARFF donde el dominio nominal completo existe aunque no
-        todos los valores aparezcan en el subconjunto de entrenamiento.
+        Explicit nominal domains per attribute. Keys may be column indices or
+        attribute names, and values must be the ordered list of allowed
+        categories. This helps reproduce ARFF-like datasets where the complete
+        nominal domain exists even if not all values appear in the training
+        subset.
 
     feature_names : list[str], optional
-        Nombres de columnas usados para trazas/exportación del árbol.
+        Column names used for traces and tree export.
 
     max_thresholds : int, optional, default=100
-        Número máximo de candidatos de threshold a evaluar por feature.
-        Si None, evalúa todos los puntos medios (más fiel a C4.5 original, más lento).
-        Valores típicos: 50-200 para balance velocidad/precisión.
+        Maximum number of threshold candidates to evaluate per feature.
+        If None, evaluates all midpoints (closer to original C4.5, but slower).
+        Typical values are 50-200 for a speed/precision balance.
         
     random_state : int, optional
-        Semilla para reproducibilidad.
+        Random seed for reproducibility.
 
     cleanup : bool, default=True
-        Si True, elimina referencias al conjunto de entrenamiento una vez
-        construido y podado el árbol, emulando el comportamiento por defecto
-        de J48 cuando no se usa la opción ``-L``.
+        If True, removes references to the training set once the tree has been
+        built and pruned, emulating J48's default behavior when ``-L`` is not
+        used.
     
     Attributes
     ----------
     classes_ : ndarray of shape (n_classes,)
-        Las clases únicas en los datos de entrenamiento.
+        Unique classes seen in the training data.
         
     n_classes_ : int
-        Número de clases.
+        Number of classes.
         
     n_features_ : int
-        Número de features en los datos de entrenamiento.
+        Number of features in the training data.
         
     root_ : _Node
-        Nodo raíz del árbol entrenado.
+        Root node of the trained tree.
     
     Examples
     --------
@@ -1261,24 +1261,24 @@ class C45TreeClassifier:
         sample_weight: Optional[np.ndarray] = None,
     ) -> "C45TreeClassifier":
         """
-        Construye el árbol de decisión a partir de datos de entrenamiento.
-        
+        Build the decision tree from training data.
+
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
-            Datos de entrenamiento.
+            Training data.
             
         y : array-like of shape (n_samples,)
-            Etiquetas objetivo.
+            Target labels.
 
         sample_weight : array-like of shape (n_samples,), optional
-            Pesos por instancia. Cuando se entrega, el árbol se entrena usando
-            dichos pesos en todos los cálculos de conteos, entropías y poda.
-            
+            Per-instance weights. When provided, the tree is trained using
+            those weights in all count, entropy, and pruning computations.
+
         Returns
         -------
         self : C45TreeClassifier
-            Clasificador entrenado.
+            Fitted classifier.
         """
         X = np.asarray(X)
         nominal_hint = bool(self.nominal_features) or bool(self.auto_detect_nominal)
@@ -1305,7 +1305,7 @@ class C45TreeClassifier:
         if n_samples > 0:
             self._log2_lut_[1:] = np.log2(np.arange(1, n_samples + 1, dtype=np.float64))
 
-        # Codificar clases a enteros consecutivos 0, 1, 2, ...
+        # Encode classes as consecutive integers 0, 1, 2, ...
         self.classes_, y_encoded = np.unique(y, return_inverse=True)
         self.classes_ = np.asarray([_to_python_scalar(v) for v in self.classes_.tolist()], dtype=object)
         self.n_classes_ = self.classes_.shape[0]
@@ -1832,23 +1832,23 @@ class C45TreeClassifier:
         path_conditions: Optional[list[str]] = None,
     ) -> _Node:
         """
-        Construye recursivamente un subárbol del C4.5.
-        
+        Recursively build a C4.5 subtree.
+
         Parameters
         ----------
         X : ndarray
-            Matriz completa de features.
+            Full feature matrix.
         y : ndarray
-            Vector completo de etiquetas (codificadas como enteros).
+            Full label vector (integer-encoded).
         indices : ndarray
-            Índices de las muestras que pertenecen a este nodo.
+            Indices of the samples that belong to this node.
         depth : int
-            Profundidad actual del árbol.
-            
+            Current tree depth.
+
         Returns
         -------
         node : _Node
-            Nodo construido (hoja o interno).
+            Constructed node (leaf or internal node).
         """
         current_path = list(path_conditions or [])
 
@@ -1880,14 +1880,14 @@ class C45TreeClassifier:
         y_sub = y[indices]
         total_weight = float(np.sum(weights))
 
-        # Contar clases ponderadas en este nodo
+        # Count weighted classes at this node.
         counts = np.bincount(y_sub, weights=weights, minlength=self.n_classes_).astype(np.float64, copy=False)
         pred_class_idx = int(np.argmax(counts))
         prediction = self.classes_[pred_class_idx]
 
-        # --- Condiciones de parada ---
-        
-        # 1. Nodo puro (una sola clase)
+        # --- Stopping conditions ---
+
+        # 1. Pure node (single class).
         if np.count_nonzero(counts > 1e-12) == 1:
             return self._make_leaf_node(
                 prediction=prediction,
@@ -1897,7 +1897,7 @@ class C45TreeClassifier:
                 train_weights=weights,
             )
 
-        # 2. Pocas muestras para dividir
+        # 2. Too few samples to split.
         if total_weight < float(self.min_samples_split) - 1e-12:
             return self._make_leaf_node(
                 prediction=prediction,
@@ -1907,7 +1907,7 @@ class C45TreeClassifier:
                 train_weights=weights,
             )
 
-        # 3. Profundidad máxima alcanzada
+        # 3. Maximum depth reached.
         if self.max_depth is not None and depth >= self.max_depth:
             return self._make_leaf_node(
                 prediction=prediction,
@@ -1917,8 +1917,8 @@ class C45TreeClassifier:
                 train_weights=weights,
             )
 
-        # --- Buscar mejor split según Gain Ratio ---
-        
+        # --- Search for the best split according to Gain Ratio. ---
+
         split_candidates = []
 
         for feat in range(self.n_features_):
@@ -1949,7 +1949,7 @@ class C45TreeClassifier:
                 train_weights=weights,
             )
 
-        # Pre-filtro C4.5: conservar solo candidatos con gain >= promedio de gain.
+        # C4.5 prefilter: keep only candidates with gain >= average node gain.
         prefilter_mean_gain: Optional[float] = None
         prefilter_candidates = list(split_candidates)
         if self.use_gain_prefilter:
@@ -1964,9 +1964,9 @@ class C45TreeClassifier:
                 if eligible:
                     split_candidates = eligible
 
-        # Selección final más cercana a WEKA:
-        # se recorre en orden de atributos y solo reemplaza si el gain ratio
-        # mejora estrictamente. En empates, sobrevive el primer candidato.
+        # Final selection closest to WEKA:
+        # iterate in feature order and replace only when the gain ratio
+        # improves strictly. In ties, keep the first candidate.
         best = split_candidates[0]
         best_gain_ratio = float(best["gain_ratio"])
         for candidate in split_candidates[1:]:
@@ -1989,7 +1989,7 @@ class C45TreeClassifier:
             selected_candidate=best,
         )
 
-        # Si no encontramos un split válido o el gain ratio es muy bajo, crear hoja
+        # If no valid split is found, or the gain ratio is too small, make a leaf.
         if best_feature is None or best_gain_ratio < self.min_gain_ratio:
             return self._make_leaf_node(
                 prediction=prediction,
@@ -2168,10 +2168,10 @@ class C45TreeClassifier:
 
     def _relocate_split_point(self, feature_index: int, threshold: float) -> float:
         """
-        Relocaliza el punto de split al mayor valor observado en el dataset
-        completo que sea menor o igual al umbral provisional.
+        Relocate the split point to the largest observed value in the full
+        dataset that is less than or equal to the provisional threshold.
 
-        Esto sigue la semántica documentada por WEKA para `setSplitPoint`.
+        This follows the semantics documented by WEKA for `setSplitPoint`.
         """
         if self._train_X_ is None:
             return float(threshold)
@@ -2226,11 +2226,12 @@ class C45TreeClassifier:
 
     def _maybe_collapse_unpruned_split(self, node: _Node) -> _Node:
         """
-        En modo unpruned puro, descarta splits que no reducen el error de
-        entrenamiento frente a la hoja del nodo.
+        In pure unpruned mode, discard splits that do not reduce training error
+        relative to the node's leaf prediction.
 
-        Esto captura ramas con gain positivo pero sin mejora predictiva real,
-        que son justo las divergencias observadas contra WEKA bajo `-U`.
+        This captures branches with positive gain but no real predictive
+        improvement, which are precisely the divergences observed against WEKA
+        under `-U`.
         """
         if node.is_leaf or self.enable_pruning or self.reduced_error_pruning:
             return node
@@ -2272,8 +2273,9 @@ class C45TreeClassifier:
 
     def _add_errs(self, n: float, errors: float) -> float:
         """
-        Extra errores pesimistas (estilo C4.5/J48 `addErrs`).
-        Retorna el número de errores adicionales sobre el error observado.
+        Extra pessimistic errors in the style of C4.5/J48 `addErrs`.
+
+        Returns the number of additional errors above the observed error.
         """
         n = float(n)
         if n <= 0.0:
@@ -2295,7 +2297,7 @@ class C45TreeClassifier:
             r = numer / denom
             return float((r * n) - err_count)
 
-        # Caso baja frecuencia de error: interpolación usada por J48.
+        # Low-error case: interpolation used by J48.
         if e < 1.0:
             base = n * (1.0 - np.power(cf, 1.0 / n))
             if e == 0.0:
@@ -2303,11 +2305,11 @@ class C45TreeClassifier:
             one_extra = _normal_extra(1.0)
             return float(base + e * (one_extra - base))
 
-        # Caso borde: casi todos mal clasificados.
+        # Edge case: almost everything is misclassified.
         if e + 0.5 >= n:
             return float(max(n - e, 0.0))
 
-        # Aproximación normal con corrección de continuidad.
+        # Normal approximation with continuity correction.
         return _normal_extra(e)
 
     @staticmethod
@@ -2345,8 +2347,8 @@ class C45TreeClassifier:
         weights: np.ndarray,
     ) -> dict[Any, tuple[np.ndarray, np.ndarray]]:
         """
-        Enruta instancias ponderadas de un conjunto arbitrario a los hijos del
-        nodo según la misma semántica usada en predicción.
+        Route weighted instances from an arbitrary set to the node's children
+        using the same semantics as prediction.
         """
         if indices.size == 0:
             return {
@@ -2488,10 +2490,10 @@ class C45TreeClassifier:
         if shuffled_indices.size == 0 or n_folds <= 1 or int(self.n_classes_ or 0) <= 1:
             return shuffled_indices
 
-        # Implementacion literal del `Instances.stratify` de WEKA:
-        # primero reagrupa por clase preservando el orden randomizado y luego
-        # aplica `stratStep`. La version vectorizada con numpy no reproduce
-        # exactamente los swaps de la estructura mutable original.
+        # Literal implementation of WEKA's `Instances.stratify`:
+        # first regroup by class while preserving randomized order, then
+        # apply `stratStep`. A vectorized NumPy version does not reproduce the
+        # exact swaps of the original mutable structure.
         grouped = shuffled_indices.tolist()
         index = 1
         while index < len(grouped):
@@ -2752,9 +2754,9 @@ class C45TreeClassifier:
         incoming_weights: np.ndarray,
     ) -> float:
         """
-        Estima el error del subárbol cuando recibe instancias adicionales
-        ponderadas, usando ruteo explícito de instancias en lugar de proyección
-        por conteos agregados.
+        Estimate subtree error when it receives additional weighted instances,
+        using explicit instance routing instead of projection from aggregated
+        counts.
         """
         incoming_indices = np.asarray(incoming_indices, dtype=np.int32)
         incoming_weights = np.asarray(incoming_weights, dtype=np.float64)
@@ -2795,9 +2797,9 @@ class C45TreeClassifier:
         incoming_weights: np.ndarray,
     ) -> _Node:
         """
-        Actualiza un subárbol promovido añadiendo instancias ponderadas del
-        hermano, para que la estructura resultante tras subtree raising tenga
-        distribuciones de clase coherentes con el entrenamiento.
+        Update a promoted subtree by adding weighted sibling instances so that
+        the structure resulting from subtree raising has class distributions
+        consistent with training.
         """
         incoming_indices = np.asarray(incoming_indices, dtype=np.int32)
         incoming_weights = np.asarray(incoming_weights, dtype=np.float64)
@@ -2856,8 +2858,8 @@ class C45TreeClassifier:
         incoming_weights: np.ndarray,
     ) -> float:
         """
-        Costo de subtree raising evaluando explícitamente cómo se redistribuyen
-        las instancias del hermano a través del subárbol promovido.
+        Cost of subtree raising by explicitly evaluating how sibling instances
+        are redistributed through the promoted subtree.
         """
         if incoming_indices.size == 0:
             return self._subtree_estimated_errors(promoted)
@@ -2969,7 +2971,7 @@ class C45TreeClassifier:
                     incoming_idx,
                     incoming_w,
                 )
-            # El subárbol promovido ahora representa el nodo padre completo.
+            # The promoted subtree now represents the full parent node.
             promoted_copy.class_counts = node.class_counts.astype(np.float64, copy=True)
             promoted_copy.prediction = node.prediction
             promoted_copy.prediction_idx = node.prediction_idx
@@ -3003,32 +3005,32 @@ class C45TreeClassifier:
 
     def _predict_batch(self, X: np.ndarray, node: _Node, indices: np.ndarray) -> np.ndarray:
         """
-        Predicción recursiva vectorizada por lotes.
-        
-        Esta función procesa múltiples muestras simultáneamente usando máscaras booleanas,
-        lo que es ~3-5x más rápido que iterar muestra por muestra.
-        
+        Recursive vectorized batch prediction.
+
+        This function processes multiple samples at once using boolean masks,
+        which is about 3-5x faster than iterating sample by sample.
+
         Parameters
         ----------
         X : ndarray
-            Matriz de features completa.
+            Full feature matrix.
         node : _Node
-            Nodo actual en el recorrido del árbol.
+            Current node in the tree traversal.
         indices : ndarray
-            Índices de las muestras a predecir en este nodo.
-            
+            Indices of the samples to predict at this node.
+
         Returns
         -------
         predictions : ndarray
-            Predicciones para las muestras indicadas.
+            Predictions for the selected samples.
         """
         if indices.size == 0:
             return np.array([], dtype=np.int32)
         
-        # Array temporal para almacenar predicciones
+        # Temporary array used to store predictions.
         predictions = np.empty(indices.size, dtype=np.int32)
-        
-        # Caso base: nodo hoja
+
+        # Base case: leaf node.
         if node.is_leaf:
             predictions[:] = int(node.prediction_idx)
             return predictions
@@ -3083,17 +3085,17 @@ class C45TreeClassifier:
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """
-        Predice clases para muestras en X.
-        
+        Predict classes for samples in X.
+
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
-            Muestras a predecir.
-            
+            Samples to predict.
+
         Returns
         -------
         y_pred : ndarray of shape (n_samples,)
-            Clase predicha para cada muestra.
+            Predicted class for each sample.
         """
         X = np.asarray(X)
         if not self._matrix_can_stay_numeric(X, bool(self._nominal_features_)):
@@ -3106,17 +3108,17 @@ class C45TreeClassifier:
             return np.array([])
 
         if self.enable_fractional_missing and (self._matrix_has_missing(X) or bool(self._nominal_features_)):
-            # Cuando hay faltantes y modo fraccional activo, usar mezcla de
-            # probabilidades para evitar ruteo duro de NaNs.
+            # When missing values are present and fractional mode is active,
+            # use a probability mixture to avoid hard routing of NaNs.
             proba = self.predict_proba(X)
             pred_idx = np.argmax(proba, axis=1)
             return self.classes_[pred_idx]
 
-        # Predicción vectorizada
+        # Vectorized prediction.
         indices = np.arange(n_samples, dtype=np.int32)
         predictions = self._predict_batch(X, self.root_, indices)
 
-        # Convertir a tipo nativo (evitar arrays de objetos)
+        # Convert to native type and avoid object arrays.
         return self.classes_[predictions]
 
     def _predict_proba_batch(
@@ -3128,20 +3130,20 @@ class C45TreeClassifier:
         weights: Optional[np.ndarray] = None,
     ) -> None:
         """
-        Predicción recursiva de probabilidades (in-place).
-        
-        Modifica el array proba directamente para evitar allocaciones innecesarias.
-        
+        Recursive probability prediction (in place).
+
+        Modifies the `proba` array directly to avoid unnecessary allocations.
+
         Parameters
         ----------
         X : ndarray
-            Matriz de features completa.
+            Full feature matrix.
         node : _Node
-            Nodo actual.
+            Current node.
         indices : ndarray
-            Índices de muestras a procesar.
+            Indices of samples to process.
         proba : ndarray
-            Array de salida (modificado in-place).
+            Output array modified in place.
         """
         if indices.size == 0:
             return
@@ -3151,7 +3153,7 @@ class C45TreeClassifier:
         else:
             weights = weights.astype(np.float32, copy=False)
         
-        # Caso base: nodo hoja
+        # Base case: leaf node.
         if node.is_leaf:
             leaf_counts = node.class_counts
             if leaf_counts is not None:
@@ -3184,7 +3186,7 @@ class C45TreeClassifier:
                     dist = np.zeros(self.n_classes_, dtype=np.float32)
                     dist[int(node.prediction_idx)] = 1.0
                 else:
-                    # Fallback: distribución uniforme
+                    # Fallback: uniform distribution.
                     dist = np.full(self.n_classes_, 1.0 / self.n_classes_, dtype=np.float32)
             else:
                 if node.prediction_idx is not None:
@@ -3297,21 +3299,21 @@ class C45TreeClassifier:
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         """
-        Predice probabilidades de clase para muestras en X.
-        
-        Las probabilidades se basan en la distribución de clases en la hoja
-        donde cae cada muestra.
-        
+        Predict class probabilities for samples in X.
+
+        Probabilities are based on the class distribution in the leaf where
+        each sample lands.
+
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
-            Muestras a predecir.
-            
+            Samples to predict.
+
         Returns
         -------
         proba : ndarray of shape (n_samples, n_classes)
-            Probabilidad de cada clase para cada muestra.
-            proba[i, j] = P(clase=j | X[i])
+            Probability of each class for each sample.
+            `proba[i, j] = P(class=j | X[i])`.
         """
         X = np.asarray(X)
         if not self._matrix_can_stay_numeric(X, bool(self._nominal_features_)):
@@ -3320,17 +3322,17 @@ class C45TreeClassifier:
             X = X.astype(np.float32, copy=False)
         n_samples = X.shape[0]
         
-        # Inicializar array de probabilidades
+        # Initialize the probability array.
         proba = np.zeros((n_samples, self.n_classes_), dtype=np.float32)
         
         if n_samples == 0:
             return proba
         
-        # Predicción vectorizada
+        # Vectorized prediction.
         indices = np.arange(n_samples, dtype=np.int32)
         self._predict_proba_batch(X, self.root_, indices, proba, None)
         
-        # Verificar filas con suma cero (no debería pasar, pero por seguridad)
+        # Check rows with zero sum (should not happen, but keep a safe fallback).
         row_sums = proba.sum(axis=1)
         zero_rows = row_sums == 0
         if zero_rows.any():

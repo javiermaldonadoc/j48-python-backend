@@ -12,10 +12,11 @@ from .engine import J48EngineSpec, build_engine
 
 class J48Classifier(ClassifierMixin, BaseEstimator):
     """
-    Wrapper scikit-learn-compatible para la implementación J48 estricta.
+    scikit-learn-compatible wrapper for the strict J48 implementation.
 
-    Esta clase expone parámetros públicos orientados a la semántica de J48 y
-    delega el entrenamiento real al motor exacto `C45TreeClassifier`.
+    This class exposes public parameters aligned with J48 semantics and
+    delegates the actual training work to the exact `C45TreeClassifier`
+    engine.
     """
 
     def __init__(
@@ -232,11 +233,11 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
 
 class J48FastClassifier(J48Classifier):
     """
-    Variante orientada a rendimiento sobre una representación interna codificada.
+    Performance-oriented variant built on an encoded internal representation.
 
-    Mantiene la misma interfaz pública de `J48Classifier`, pero usa
-    `backend='numpy_fast'` por defecto para reducir el costo de columnas
-    nominales y conversiones de `dtype=object`.
+    It keeps the same public interface as `J48Classifier`, but uses
+    `backend='numpy_fast'` by default to reduce the cost of nominal columns
+    and `dtype=object` conversions.
     """
 
     def __init__(

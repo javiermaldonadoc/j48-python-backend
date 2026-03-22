@@ -60,12 +60,12 @@ def _cache_put(
 @dataclass(frozen=True)
 class J48EngineSpec:
     """
-    Describe el backend de ejecución asociado a la familia J48.
+    Describes the execution backend associated with the J48 family.
 
-    `numpy` preserva la representación actual del baseline estricto.
-    `numpy_fast` aplica una codificación interna densa para atributos
-    nominales, orientada a reducir el costo de `dtype=object` sin cambiar la
-    API pública del estimador.
+    `numpy` preserves the current strict-baseline representation.
+    `numpy_fast` applies a dense internal encoding for nominal attributes,
+    aimed at reducing the cost of `dtype=object` without changing the
+    estimator's public API.
     """
 
     backend: str = "numpy"
@@ -77,9 +77,9 @@ class J48EngineSpec:
 
 class NumpyJ48Engine:
     """
-    Backend exacto basado en NumPy.
+    Exact NumPy-based backend.
 
-    Mantiene la semántica y representación del baseline `strict`.
+    Preserves the semantics and representation of the `strict` baseline.
     """
 
     def __init__(self, spec: Optional[J48EngineSpec] = None) -> None:
@@ -421,11 +421,11 @@ else:
 
 class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
     """
-    Backend rápido basado en una representación densa `float64`.
+    Fast backend built on a dense `float64` representation.
 
-    La optimización inicial codifica atributos nominales a enteros y preserva
-    los faltantes como `NaN`. Esto reduce el costo de `dtype=object` en los
-    hot paths sin cambiar el contrato público del estimador.
+    The initial optimization encodes nominal attributes as integers and keeps
+    missing values as `NaN`. This reduces the `dtype=object` cost in hot paths
+    without changing the estimator's public contract.
     """
 
     def __init__(self, spec: Optional[J48EngineSpec] = None) -> None:
