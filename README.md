@@ -74,6 +74,7 @@ The public documentation set is intentionally minimal and is limited to material
 
 See [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) for the technical structure and validation summary retained in the public version.
 See [REPRODUCIBILITY.md](REPRODUCIBILITY.md) for the reviewer-facing reproduction guidance.
+See [PAPER_REPRODUCTION.md](PAPER_REPRODUCTION.md) for a precise statement of what the public artifact can and cannot reproduce from the paper.
 
 ## Data policy
 

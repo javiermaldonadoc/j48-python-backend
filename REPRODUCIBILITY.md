@@ -47,7 +47,10 @@ For paper review, this repository should be read together with:
 
 - the paper itself,
 - the repository README,
+- the paper reproduction guide,
 - the technical overview,
 - the data-availability statement.
 
 If a submission version requires additional archival evidence, it is preferable to add a single curated appendix-style artifact note rather than exposing internal development logs.
+
+See [PAPER_REPRODUCTION.md](PAPER_REPRODUCTION.md) for a more explicit description of which parts of the paper can be reproduced from the public artifact alone and which still depend on the larger research workspace.
