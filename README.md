@@ -41,6 +41,47 @@ Additional analysis utilities in `j48.acceptance_analysis` also use:
 - `pandas`
 - `scipy`
 
+Optional acceleration support:
+
+- `numba`
+
+## Installation
+
+Install a tagged release from the repository once it has been published:
+
+```bash
+python -m pip install "git+https://github.com/javiermaldonadoc/j48-python-backend.git@<tag>"
+```
+
+For local editable use:
+
+```bash
+git clone https://github.com/javiermaldonadoc/j48-python-backend.git
+cd j48-python-backend
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[all]"
+```
+
+Minimal runtime installation only requires the core dependencies:
+
+```bash
+python -m pip install -e .
+```
+
+Optional extras:
+
+- `analysis`: installs `pandas` and `scipy`
+- `fast`: installs `numba`
+- `all`: installs all optional dependencies
+
+Quick smoke test:
+
+```bash
+python -c "from j48 import J48Classifier, J48FastClassifier; print(J48Classifier, J48FastClassifier)"
+```
+
 ## Minimal usage
 
 ```python
@@ -86,13 +127,17 @@ See [DATA_AVAILABILITY.md](DATA_AVAILABILITY.md) for the repository-level data a
 
 ## Citation
 
-Formal citation information will be added once the paper and its bibliographic details are publicly available.
+Until the associated paper has final bibliographic metadata, cite the software artifact directly and include the exact release tag or commit used in your workflow.
+
+Suggested software citation format:
+
+Javier Maldonado. *j48-python-backend*. GitHub repository. Versioned software artifact release. 2026. Available at: https://github.com/javiermaldonadoc/j48-python-backend.
 
 ## Artifact version
 
-Current public artifact version: `0.1.0`.
+The public artifact is intended to be consumed through tagged releases.
 
-This version is the paper-facing release snapshot used to expose the software artifact for technical review and practical reuse.
+For manuscript alignment, cite the exact tag and commit used by the paper instead of the moving default branch.
 
 ## Status
 

@@ -4,7 +4,7 @@ from .core import C45TreeClassifier
 from .engine import EncodedNumpyJ48FastEngine, J48EngineSpec, NumpyJ48Engine, build_engine
 from .sklearn_api import J48Classifier, J48FastClassifier
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 J48CoreClassifier = C45TreeClassifier
 

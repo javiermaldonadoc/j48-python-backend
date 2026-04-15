@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "j48-python-backend"
+version = "0.1.1"
+description = "J48-targeting decision-tree backend with scikit-learn-compatible estimators."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Javier Maldonado" }
+]
+keywords = [
+  "J48",
+  "C4.5",
+  "decision trees",
+  "scikit-learn",
+  "machine learning"
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: BSD License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Libraries :: Python Modules"
+]
+dependencies = [
+  "numpy>=1.23",
+  "scikit-learn>=1.2"
+]
+
+[project.optional-dependencies]
+analysis = [
+  "pandas>=1.5",
+  "scipy>=1.10"
+]
+fast = [
+  "numba>=0.58"
+]
+all = [
+  "pandas>=1.5",
+  "scipy>=1.10",
+  "numba>=0.58"
+]
+
+[project.urls]
+Homepage = "https://github.com/javiermaldonadoc/j48-python-backend"
+Repository = "https://github.com/javiermaldonadoc/j48-python-backend"
+Issues = "https://github.com/javiermaldonadoc/j48-python-backend/issues"
+
+[tool.setuptools.packages.find]
+include = ["j48*"]

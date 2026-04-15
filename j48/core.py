@@ -27,6 +27,23 @@ except Exception:  # pragma: no cover - optional acceleration dependency
 logger = logging.getLogger(__name__)
 
 _NOMINAL_OTHER_BRANCH = "__WEKA_OTHER__"
+_EMPTY_INT32 = np.empty(0, dtype=np.int32)
+_EMPTY_FLOAT64 = np.empty(0, dtype=np.float64)
+_EMPTY_WEIGHTED_PAIR = (_EMPTY_INT32, _EMPTY_FLOAT64)
+
+
+def _as_int32_array(value: Any) -> np.ndarray:
+    if isinstance(value, np.ndarray) and value.dtype == np.int32:
+        return value
+    return np.asarray(value, dtype=np.int32)
+
+
+def _as_float64_array(value: Any, *, copy: bool = False) -> np.ndarray:
+    if isinstance(value, np.ndarray) and value.dtype == np.float64 and not copy:
+        return value
+    if isinstance(value, np.ndarray):
+        return value.astype(np.float64, copy=copy)
+    return np.asarray(value, dtype=np.float64)
 
 
 def _to_python_scalar(value: Any) -> Any:
@@ -1248,7 +1265,12 @@ class C45TreeClassifier:
         weight_parts: list[np.ndarray],
     ) -> tuple[np.ndarray, np.ndarray]:
         if not indices_parts:
-            return np.array([], dtype=np.int32), np.array([], dtype=np.float64)
+            return _EMPTY_WEIGHTED_PAIR
+        if len(indices_parts) == 1:
+            return (
+                _as_int32_array(indices_parts[0]),
+                _as_float64_array(weight_parts[0]),
+            )
         return (
             np.concatenate(indices_parts).astype(np.int32, copy=False),
             np.concatenate(weight_parts).astype(np.float64, copy=False),
@@ -2352,12 +2374,12 @@ class C45TreeClassifier:
         """
         if indices.size == 0:
             return {
-                edge: (np.array([], dtype=np.int32), np.array([], dtype=np.float64))
+                edge: _EMPTY_WEIGHTED_PAIR
                 for edge, _ in self._iter_child_items(node)
             }
 
         x_feat = X_data[indices, node.feature_index]
-        weights = weights.astype(np.float64, copy=False)
+        weights = _as_float64_array(weights)
 
         if node.split_type == "nominal":
             child_items = self._iter_child_items(node)
@@ -2758,8 +2780,8 @@ class C45TreeClassifier:
         using explicit instance routing instead of projection from aggregated
         counts.
         """
-        incoming_indices = np.asarray(incoming_indices, dtype=np.int32)
-        incoming_weights = np.asarray(incoming_weights, dtype=np.float64)
+        incoming_indices = _as_int32_array(incoming_indices)
+        incoming_weights = _as_float64_array(incoming_weights)
 
         if incoming_indices.size == 0:
             return self._subtree_estimated_errors(node)
@@ -2783,10 +2805,7 @@ class C45TreeClassifier:
         routed = self._route_indices_with_weights(node, incoming_indices, incoming_weights)
         total_error = 0.0
         for edge, child in child_items:
-            child_idx, child_w = routed.get(
-                edge,
-                (np.array([], dtype=np.int32), np.array([], dtype=np.float64)),
-            )
+            child_idx, child_w = routed[edge]
             total_error += self._subtree_estimated_errors_with_incoming(child, child_idx, child_w)
         return total_error
 
@@ -2801,28 +2820,30 @@ class C45TreeClassifier:
         the structure resulting from subtree raising has class distributions
         consistent with training.
         """
-        incoming_indices = np.asarray(incoming_indices, dtype=np.int32)
-        incoming_weights = np.asarray(incoming_weights, dtype=np.float64)
+        incoming_indices = _as_int32_array(incoming_indices)
+        incoming_weights = _as_float64_array(incoming_weights)
+
+        if incoming_indices.size == 0:
+            return node
 
         if node.class_counts is None:
             node.class_counts = np.zeros(self.n_classes_, dtype=np.float64)
         else:
-            node.class_counts = node.class_counts.astype(np.float64, copy=True)
+            node.class_counts = _as_float64_array(node.class_counts, copy=True)
 
-        if incoming_indices.size > 0:
-            extra_counts = np.bincount(
-                self._train_y_encoded_[incoming_indices],
-                weights=incoming_weights,
-                minlength=self.n_classes_,
-            ).astype(np.float64, copy=False)
-            node.class_counts = node.class_counts + extra_counts
+        extra_counts = np.bincount(
+            self._train_y_encoded_[incoming_indices],
+            weights=incoming_weights,
+            minlength=self.n_classes_,
+        ).astype(np.float64, copy=False)
+        node.class_counts = node.class_counts + extra_counts
 
-            if node.train_indices is None:
-                node.train_indices = incoming_indices.copy()
-                node.train_weights = incoming_weights.copy()
-            else:
-                node.train_indices = np.concatenate((node.train_indices, incoming_indices)).astype(np.int32, copy=False)
-                node.train_weights = np.concatenate((node.train_weights, incoming_weights)).astype(np.float64, copy=False)
+        if node.train_indices is None:
+            node.train_indices = incoming_indices.copy()
+            node.train_weights = incoming_weights.copy()
+        else:
+            node.train_indices = np.concatenate((node.train_indices, incoming_indices)).astype(np.int32, copy=False)
+            node.train_weights = np.concatenate((node.train_weights, incoming_weights)).astype(np.float64, copy=False)
 
         if np.any(node.class_counts > 0.0):
             node.prediction_idx = int(np.argmax(node.class_counts))
@@ -2830,21 +2851,18 @@ class C45TreeClassifier:
         self._invalidate_cached_metrics(node)
 
         child_items = self._iter_child_items(node)
-        if node.is_leaf or not child_items or incoming_indices.size == 0:
+        if node.is_leaf or not child_items:
             return node
 
         routed = self._route_indices_with_weights(node, incoming_indices, incoming_weights)
         if node.split_type == "nominal":
             for edge, child in child_items:
-                child_idx, child_w = routed.get(
-                    edge,
-                    (np.array([], dtype=np.int32), np.array([], dtype=np.float64)),
-                )
+                child_idx, child_w = routed[edge]
                 if child_idx.size > 0:
                     node.nominal_children[edge] = self._augment_subtree_with_incoming(child, child_idx, child_w)
         else:
-            left_idx, left_w = routed.get("left", (np.array([], dtype=np.int32), np.array([], dtype=np.float64)))
-            right_idx, right_w = routed.get("right", (np.array([], dtype=np.int32), np.array([], dtype=np.float64)))
+            left_idx, left_w = routed["left"]
+            right_idx, right_w = routed["right"]
             if left_idx.size > 0 and node.left is not None:
                 node.left = self._augment_subtree_with_incoming(node.left, left_idx, left_w)
             if right_idx.size > 0 and node.right is not None:
