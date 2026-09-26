@@ -131,7 +131,7 @@ Known divergences are listed in the test file as expected failures. CI runs all 
 ## Choosing an estimator
 
 - `J48Classifier` is the reference line used for WEKA comparisons. It is pure NumPy.
-- `J48FastClassifier` builds the same trees (verified by the test suite) from an encoded representation and uses numba kernels when `numba` is installed. On 100k x 20 numeric rows it trains about 2.5x faster than `J48Classifier` and 5x faster than in 0.3.0; with many nominal columns (e.g. IDS datasets) it is roughly an order of magnitude faster than the strict line. Call `warmup_backend()` once to exclude numba compilation from timings.
+- `J48FastClassifier` builds the same trees (verified by the test suite) from an encoded representation and uses numba kernels when `numba` is installed. On 100k x 20 numeric rows it trains about 2.5x faster than `J48Classifier` and 5x faster than in 0.3.0; with nominal columns it is 3.5x (5 nominal columns) to 10x (IDS-like data with a 70-value `service` attribute) faster than the strict line. Call `warmup_backend()` once to exclude numba compilation from timings.
 
 See [CHANGELOG.md](CHANGELOG.md) for benchmark details.
 
