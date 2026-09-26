@@ -186,3 +186,23 @@ def test_pandas_nullable_dtypes_and_pd_na(cls):
     # A model fitted on NumPy-backed dtypes can score nullable frames.
     plain = cls(nominal_features=[0]).fit(df, y)
     np.testing.assert_array_equal(plain.predict(df.convert_dtypes()), plain.predict(df))
+
+
+@pytest.mark.parametrize("cls", ESTIMATORS)
+def test_column_name_check_follows_scikit_learn_rules(cls):
+    pd = pytest.importorskip("pandas")
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(120, 2))
+    y = (X[:, 0] > 0).astype(int)
+
+    # Non-string labels (e.g. pd.DataFrame(ndarray)) are not treated as names.
+    clf = cls().fit(pd.DataFrame(X), y)
+    clf.predict(pd.DataFrame(X, columns=["a", "b"]))
+
+    # A refit through fit_prepared_bundle replaces the recorded names.
+    clf = cls().fit(pd.DataFrame(X, columns=["a", "b"]), y)
+    frame_cd = pd.DataFrame(X, columns=["c", "d"])
+    bundle = clf.engine_.prepare_fit_bundle(frame_cd, y)
+    clf.fit_prepared_bundle(bundle)
+    clf.predict(frame_cd)
+

@@ -12,6 +12,17 @@ from .core import C45TreeClassifier, warmup_numba_numeric_kernel
 from .engine import J48EngineSpec, build_engine
 
 
+def _string_column_names(X: Any) -> Optional[list[str]]:
+    """DataFrame column names, only when all of them are strings (as scikit-learn)."""
+    columns = getattr(X, "columns", None)
+    if columns is None:
+        return None
+    names = list(columns)
+    if not names or not all(isinstance(name, str) for name in names):
+        return None
+    return names
+
+
 def _input_shape(X: Any) -> tuple[int, ...]:
     shape = getattr(X, "shape", None)
     if shape is None:
@@ -138,10 +149,6 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
         self._validate_params()
         self._validate_X(X, reset=True)
         y = self._validate_y(y)
-        columns = getattr(X, "columns", None)
-        # Column names seen in fit; predict() requires the same names in the
-        # same order when it also receives a DataFrame.
-        self._fit_column_names_ = None if columns is None else [str(c) for c in columns]
 
         self.engine_ = build_engine(backend=self.backend, fidelity=self.fidelity)
         fit_bundle = self.engine_.prepare_fit_bundle(
@@ -152,6 +159,9 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
             auto_detect_nominal=self.auto_detect_nominal,
             nominal_value_domains=self.nominal_value_domains,
         )
+        # String column names seen in fit; predict() requires the same names in
+        # the same order when it also receives such a DataFrame.
+        fit_bundle["column_names"] = _string_column_names(X)
         return self.fit_prepared_bundle(fit_bundle, sample_weight=sample_weight)
 
     def _validate_params(self) -> None:
@@ -199,9 +209,8 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
                 f"{self.n_features_in_} features as input."
             )
         fitted_columns = getattr(self, "_fit_column_names_", None)
-        columns = getattr(X, "columns", None)
-        if not reset and fitted_columns is not None and columns is not None:
-            names = [str(c) for c in columns]
+        names = _string_column_names(X)
+        if not reset and fitted_columns is not None and names is not None:
             if names != fitted_columns:
                 mismatched = [
                     f"position {i}: fitted {expected!r}, got {got!r}"
@@ -238,6 +247,7 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
     ) -> "J48Classifier":
         self._validate_params()
         self._ensure_engine()
+        self._fit_column_names_ = fit_bundle.get("column_names")
         feature_names = fit_bundle["feature_names"]
         X_arr = fit_bundle["X"]
         y_arr = fit_bundle["y"]
