@@ -2022,8 +2022,19 @@ class C45TreeClassifier:
                 X_num = X[np.ix_(indices, numeric_feats)]
             column_slot = {feat: j for j, feat in enumerate(numeric_feats)}
             numeric_column = lambda feat: X_num[:, column_slot[feat]]  # noqa: E731
+        elif X.dtype == object:
+            # Object matrices: coercion is a per-value Python loop, so convert
+            # each column once per node. The memo is dropped before recursing.
+            column_memo: dict[int, np.ndarray] = {}
+
+            def numeric_column(feat: int) -> np.ndarray:
+                column = column_memo.get(feat)
+                if column is None:
+                    column = column_memo[feat] = self._coerce_numeric_column(X[indices, feat])
+                return column
         else:
-            # Strict line: materialize one column at a time, as before.
+            # Numeric matrices: a column is a cheap gather, so materialize one
+            # at a time to keep peak memory low.
             numeric_column = lambda feat: self._coerce_numeric_column(X[indices, feat])  # noqa: E731
         if sorted_orders is None:
             sorted_orders = self._initial_sorted_orders(numeric_feats, numeric_column)
@@ -2065,6 +2076,7 @@ class C45TreeClassifier:
         # Keep only the column that may be split on; release the rest before
         # recursing so per-node copies do not accumulate along the path.
         numeric_column = None
+        column_memo = None
 
         if not split_candidates:
             return self._make_leaf_node(
