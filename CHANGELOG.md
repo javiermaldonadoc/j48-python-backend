@@ -4,6 +4,53 @@ All notable changes to this project are documented in this file.
 The project follows [Semantic Versioning](https://semver.org/); while the
 version is `0.x`, a minor bump may change public behavior.
 
+## [0.4.0] - 2026-09-26
+
+Performance release. Trees, split features, thresholds and predictions are
+identical to 0.3.0 (192 randomized strict/fast configurations, and the
+WEKA parity suite gives the same results); stored split statistics and
+probabilities differ only by floating-point rounding (< 3e-14), because
+tied values are now summed in a different order.
+
+### Benchmarks (vs 0.3.0, same machine, single runs)
+
+| Workload | Line | Fit 0.3.0 | Fit 0.4.0 | Peak memory 0.3.0 → 0.4.0 |
+|---|---|---|---|---|
+| 100k x 20 numeric, 5% missing | fast | 16.9 s | **3.1 s** (5.5x) | 49.2 → 49.9 MiB |
+| 100k x 20 numeric, 5% missing | strict | 11.2 s | **7.8 s** (1.4x) | 38.7 → 35.1 MiB |
+| 60k x 41 IDS-like (3 nominal, 70-value service) | fast | 28.9 s | **20.0 s** (-31%) | |
+| 60k x 41 IDS-like | strict | 197 s | 207 s (+5%, within run-to-run noise at 20k rows) | |
+| 30k x 15, 5 nominal (8 values) | fast / strict | 4.3 / 15.6 s | 4.4 / 15.2 s | |
+
+`J48FastClassifier.predict` on 100k x 20 numeric rows: 0.11 s → 0.014 s.
+
+### Changed
+
+- Numeric features are sorted once per fit and each child inherits a
+  narrowed order in O(n), instead of re-sorting every feature at every
+  node (classic C4.5 presorting). For many-way nominal splits, children
+  re-sort when that is cheaper than narrowing.
+- Fast line: all numeric features of a node are evaluated in a single
+  numba call; nominal split search uses one `bincount` per feature on the
+  encoded codes instead of one mask per value.
+- Fast line: numeric columns are encoded vectorized (was a per-value
+  Python loop, ~65% of fit time on numeric data), and all-numeric
+  prediction input is used without copying.
+- Order buffers are released along the recursion path, keeping peak
+  memory at or below 0.3.0 levels.
+- Mask-free binary entropy in the strict line (bitwise identical).
+
+### Removed
+
+- Internal numba kernels that sorted inside every call
+  (`_find_best_*_numeric_split_unsorted_numba`) and
+  `C45TreeClassifier._find_best_numeric_split_candidate`, superseded by
+  the presorted path. They were private.
+
+### Added
+
+- Property test for order narrowing (NumPy and numba implementations).
+
 ## [0.3.0] - 2026-09-26
 
 scikit-learn conformance and WEKA parity release. Trees are unchanged
@@ -129,6 +176,7 @@ below only affect the cases described.
 
 - Paper-facing artifact snapshot.
 
+[0.4.0]: https://github.com/javiermaldonadoc/j48-python-backend/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/javiermaldonadoc/j48-python-backend/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/javiermaldonadoc/j48-python-backend/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/javiermaldonadoc/j48-python-backend/compare/v0.1.0...v0.1.1
