@@ -1,0 +1,82 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: py${{ matrix.python }} ${{ matrix.extras }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        extras: ["all,test"]
+        include:
+          # Pure NumPy fallback paths, without numba.
+          - python: "3.12"
+            extras: "test"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[${{ matrix.extras }}]"
+      - name: Test
+        run: python -m pytest -q
+
+  minimum-versions:
+    name: minimum dependency versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install oldest supported dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "numpy==1.23.5" "scikit-learn==1.2.2" "scipy==1.10.1" "pandas==1.5.3" "numba==0.58.1" pytest
+          python -m pip install --no-deps -e .
+      - name: Test
+        run: python -m pytest -q -W error::FutureWarning
+
+  weka-parity:
+    name: WEKA J48 parity
+    runs-on: ubuntu-latest
+    env:
+      WEKA_VERSION: "3.8.6"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Download WEKA
+        run: |
+          base=https://repo1.maven.org/maven2/nz/ac/waikato/cms/weka
+          curl -sSfLO "$base/weka-stable/$WEKA_VERSION/weka-stable-$WEKA_VERSION.jar"
+          curl -sSfLO "$base/thirdparty/bounce/0.18/bounce-0.18.jar"
+          echo "J48_WEKA_CLASSPATH=$PWD/weka-stable-$WEKA_VERSION.jar:$PWD/bounce-0.18.jar" >> "$GITHUB_ENV"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[all,test]"
+      - name: Test against WEKA
+        run: python -m pytest -q -m weka tests/test_weka_parity.py

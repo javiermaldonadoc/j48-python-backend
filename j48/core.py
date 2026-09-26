@@ -1150,10 +1150,16 @@ class C45TreeClassifier:
     def _nominal_match_mask(self, values: np.ndarray, target_value: Any) -> np.ndarray:
         arr = np.asarray(values)
         if arr.dtype != object:
+            if arr.dtype.kind in "biuf" and isinstance(target_value, (str, bytes)):
+                # A string never equals a number. NumPy < 2 would return a
+                # scalar False (with a FutureWarning) instead of a mask.
+                return np.zeros(arr.shape[0], dtype=bool)
             try:
-                return arr == target_value
+                result = arr == target_value
             except Exception:
-                pass
+                result = None
+            if isinstance(result, np.ndarray) and result.shape == arr.shape:
+                return result
         obj_arr = np.asarray(arr, dtype=object)
         return np.array(
             [self._normalize_nominal_value(v) == target_value for v in obj_arr.tolist()],
@@ -1347,6 +1353,8 @@ class C45TreeClassifier:
                 raise ValueError("sample_weight must contain only finite values")
             if np.any(weights < 0.0):
                 raise ValueError("sample_weight must be non-negative")
+            if not np.any(weights > 0.0):
+                raise ValueError("Sample weights must contain at least one non-zero number.")
 
         if self.reduced_error_pruning:
             if self.num_folds < 2:
@@ -2257,9 +2265,12 @@ class C45TreeClassifier:
 
         This captures branches with positive gain but no real predictive
         improvement, which are precisely the divergences observed against WEKA
-        under `-U`.
+        under `-U`. Like WEKA's `collapse()`, this only applies when
+        `collapse_tree` is enabled (i.e. J48 is run without `-O`).
         """
         if node.is_leaf or self.enable_pruning or self.reduced_error_pruning:
+            return node
+        if not self.collapse_tree:
             return node
 
         child_items = self._iter_child_items(node)
