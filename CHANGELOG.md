@@ -6,23 +6,51 @@ version is `0.x`, a minor bump may change public behavior.
 
 ## [0.4.0] - 2026-09-26
 
-Performance release. Trees, split features, thresholds and predictions are
-identical to 0.3.0 (192 randomized strict/fast configurations, and the
-WEKA parity suite gives the same results); stored split statistics and
-probabilities differ only by floating-point rounding (< 3e-14), because
-tied values are now summed in a different order.
+Performance release, plus fixes found while reviewing it.
 
-### Benchmarks (vs 0.3.0, same machine, single runs)
+**Tree compatibility with 0.3.0.** Split choices are unchanged except where
+two candidates tie exactly and floating-point rounding decides, which can
+only happen with fractional instance weights (fractional missing-value
+propagation or `sample_weight`). On 192 randomized configurations of
+ordinary data, trees and predictions are identical to 0.3.0. On
+deliberately tie-heavy data (4 distinct values per feature, 15% missing),
+38 of 1800 fits differ; every difference was traced to an exact tie
+(e.g. two binary nominal partitions whose gain ratios differ only in the
+16th digit), typically a collapse/prune decision deep in the tree. The
+WEKA parity suite gives the same results as 0.3.0.
+
+### Fixed
+
+- **Strict and fast lines could build different trees on exact ties.**
+  The two lines summed nominal branch weights with different operations
+  (masks + `np.sum` vs `bincount`), so rounding broke ties differently.
+  Both now use one counting path. On 1800 tie-heavy fits, strict != fast
+  went from 12 (0.3.0) to 0. This also makes the strict line faster on
+  nominal data.
+- **DataFrame columns are checked at predict time.** Columns are used by
+  position, so a DataFrame with reordered columns was scored silently with
+  the wrong features (strict line) or crashed (fast line). Both now raise
+  scikit-learn's "feature names should match" error when a model fitted on
+  string column names receives different names or order.
+- **pandas nullable dtypes in the fast line.** `J48FastClassifier` could
+  not predict on `Int64`/`Float64`/`string` extension dtypes (for example
+  from `DataFrame.convert_dtypes()` or pandas 3 defaults).
+- **`pd.NA` in the strict line.** `J48Classifier` raised "boolean value of
+  NA is ambiguous"; `pd.NA`/`pd.NaT` are now missing values, exactly like
+  `None`.
+
+### Benchmarks (vs 0.3.0, same machine, measured back to back)
 
 | Workload | Line | Fit 0.3.0 | Fit 0.4.0 | Peak memory 0.3.0 → 0.4.0 |
 |---|---|---|---|---|
-| 100k x 20 numeric, 5% missing | fast | 16.9 s | **3.1 s** (5.5x) | 49.2 → 49.9 MiB |
-| 100k x 20 numeric, 5% missing | strict | 11.2 s | **7.8 s** (1.4x) | 38.7 → 35.1 MiB |
-| 60k x 41 IDS-like (3 nominal, 70-value service) | fast | 28.9 s | **20.0 s** (-31%) | |
-| 60k x 41 IDS-like | strict | 197 s | 207 s (+5%, within run-to-run noise at 20k rows) | |
-| 30k x 15, 5 nominal (8 values) | fast / strict | 4.3 / 15.6 s | 4.4 / 15.2 s | |
+| 100k x 20 numeric, 5% missing | fast | 13.7 s | **2.7 s** (5.1x) | 49.2 → 49.9 MiB |
+| 100k x 20 numeric, 5% missing | strict | 7.4 s | **4.7 s** (1.6x) | 38.7 → 35.2 MiB |
+| 60k x 41 IDS-like (3 nominal, 70-value service) | fast | 19.2 s | **14.3 s** (-26%) | |
+| 60k x 41 IDS-like | strict | 117.6 s | **100.8 s** (-14%) | |
+| 30k x 15, 5 nominal (8 values) | fast / strict | 2.8 / 10.3 s | 2.9 / **7.0 s** | |
 
-`J48FastClassifier.predict` on 100k x 20 numeric rows: 0.11 s → 0.014 s.
+`J48FastClassifier.predict` on 100k x 20 numeric rows: 0.089 s → 0.012 s.
+Absolute times vary with machine load; compare within a row.
 
 ### Changed
 
@@ -50,6 +78,8 @@ tied values are now summed in a different order.
 ### Added
 
 - Property test for order narrowing (NumPy and numba implementations).
+- Strict/fast agreement test on tie-heavy data, and regression tests for
+  column-name checks, nullable dtypes and `pd.NA`.
 
 ## [0.3.0] - 2026-09-26
 
