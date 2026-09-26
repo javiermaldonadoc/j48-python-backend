@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "j48-python-backend"
-version = "0.1.1"
+version = "0.2.0"
 description = "J48-targeting decision-tree backend with scikit-learn-compatible estimators."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,6 +45,10 @@ analysis = [
 fast = [
   "numba>=0.58"
 ]
+test = [
+  "pytest>=7",
+  "pandas>=1.5"
+]
 all = [
   "pandas>=1.5",
   "scipy>=1.10",
@@ -55,6 +59,10 @@ all = [
 Homepage = "https://github.com/javiermaldonadoc/j48-python-backend"
 Repository = "https://github.com/javiermaldonadoc/j48-python-backend"
 Issues = "https://github.com/javiermaldonadoc/j48-python-backend/issues"
+Changelog = "https://github.com/javiermaldonadoc/j48-python-backend/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 include = ["j48*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

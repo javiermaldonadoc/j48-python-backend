@@ -4,6 +4,8 @@ This repository is intended to serve as the public software artifact associated 
 
 The current paper-facing artifact snapshot is version `0.1.0`.
 
+> Release note: later releases (from `0.2.0`) contain correctness fixes listed in [CHANGELOG.md](CHANGELOG.md). To reproduce the paper exactly, install the paper tag; to reuse the software, prefer the latest release.
+
 ## What this repository supports directly
 
 This repository supports direct inspection and reuse of:

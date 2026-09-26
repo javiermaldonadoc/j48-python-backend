@@ -4,6 +4,8 @@ This document explains what can and cannot be reproduced from the public softwar
 
 Artifact version covered here: `0.1.0`.
 
+> Release note: later releases (from `0.2.0`) contain correctness fixes listed in [CHANGELOG.md](CHANGELOG.md). To reproduce the paper exactly, install the paper tag; to reuse the software, prefer the latest release.
+
 ## Scope
 
 The paper combines two layers:

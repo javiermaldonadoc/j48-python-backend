@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import copy
-import weakref
-from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -19,42 +17,7 @@ except Exception:  # pragma: no cover - pandas is expected in the project env
     pd = None
 
 
-_ENCODED_CACHE_MAX_ITEMS = 16
 _COMPILED_NOMINAL_OTHER_SENTINEL = -2147483648
-_FIT_BUNDLE_CACHE: "OrderedDict[tuple[Any, ...], tuple[weakref.ReferenceType[Any], dict[str, Any]]]" = OrderedDict()
-_PREDICT_DATA_CACHE: "OrderedDict[tuple[Any, ...], tuple[weakref.ReferenceType[Any], np.ndarray]]" = OrderedDict()
-
-
-def _cache_get(
-    cache: "OrderedDict[tuple[Any, ...], tuple[weakref.ReferenceType[Any], Any]]",
-    key: tuple[Any, ...],
-    source: Any,
-) -> Any:
-    entry = cache.get(key)
-    if entry is None:
-        return None
-    source_ref, value = entry
-    if source_ref() is not source:
-        cache.pop(key, None)
-        return None
-    cache.move_to_end(key)
-    return value
-
-
-def _cache_put(
-    cache: "OrderedDict[tuple[Any, ...], tuple[weakref.ReferenceType[Any], Any]]",
-    key: tuple[Any, ...],
-    source: Any,
-    value: Any,
-) -> None:
-    try:
-        source_ref = weakref.ref(source)
-    except TypeError:
-        return
-    cache[key] = (source_ref, value)
-    cache.move_to_end(key)
-    while len(cache) > _ENCODED_CACHE_MAX_ITEMS:
-        cache.popitem(last=False)
 
 
 @dataclass(frozen=True)
@@ -188,6 +151,10 @@ class NumpyJ48Engine:
         raise NotImplementedError
 
     def get_last_prepare_predict_cache_hit(self) -> bool:
+        """
+        Kept for backward compatibility. Since 0.2.0 prepared inputs are no
+        longer cached across calls, so this always returns False.
+        """
         return bool(self._last_prepare_predict_cache_hit)
 
     @staticmethod
@@ -282,16 +249,16 @@ if ENGINE_NUMBA_AVAILABLE:
     ) -> np.ndarray:
         n_rows = X.shape[0]
         n_classes = leaf_proba.shape[1]
-        out = np.zeros((n_rows, n_classes), dtype=np.float32)
+        out = np.zeros((n_rows, n_classes), dtype=np.float64)
         n_nodes = split_type.shape[0]
         for row_idx in range(n_rows):
             if n_nodes == 0:
                 continue
             node_stack = np.empty(n_nodes, dtype=np.int32)
-            weight_stack = np.empty(n_nodes, dtype=np.float32)
+            weight_stack = np.empty(n_nodes, dtype=np.float64)
             stack_size = 1
             node_stack[0] = 0
-            weight_stack[0] = np.float32(1.0)
+            weight_stack[0] = np.float64(1.0)
             while stack_size > 0:
                 stack_size -= 1
                 node = node_stack[stack_size]
@@ -315,8 +282,8 @@ if ENGINE_NUMBA_AVAILABLE:
                         continue
 
                     if fractional_missing:
-                        lp = np.float32(left_prob[node])
-                        rp = np.float32(1.0) - lp
+                        lp = np.float64(left_prob[node])
+                        rp = np.float64(1.0) - lp
                         child = left_child[node]
                         if child >= 0 and lp > 0.0:
                             node_stack[stack_size] = child
@@ -363,7 +330,7 @@ if ENGINE_NUMBA_AVAILABLE:
                 if fractional_missing:
                     for edge_idx in range(start, end):
                         child = edge_children[edge_idx]
-                        prob = np.float32(edge_probs[edge_idx])
+                        prob = np.float64(edge_probs[edge_idx])
                         if child >= 0 and prob > 0.0:
                             node_stack[stack_size] = child
                             weight_stack[stack_size] = weight * prob
@@ -444,91 +411,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
         self._fast_nominal_code_maps: dict[int, dict[Any, int]] = {}
         self._fast_nominal_unseen_codes: dict[int, float] = {}
         self._compiled_tree_cache: Optional[dict[str, Any]] = None
-        self._last_path_details_cache_key: Optional[tuple[Any, ...]] = None
-        self._last_path_details_cache_value: Optional[dict[str, Any]] = None
-
-    def _feature_names_key(self, feature_names: Optional[list[str]]) -> Optional[tuple[str, ...]]:
-        if feature_names is None:
-            return None
-        return tuple(str(v) for v in feature_names)
-
-    def _nominal_features_key(self, nominal_features: Optional[list[int]]) -> tuple[int, ...]:
-        if nominal_features is None:
-            return ()
-        return tuple(int(v) for v in nominal_features)
-
-    def _nominal_domains_key(
-        self,
-        nominal_value_domains: Optional[dict[Any, list[Any]]],
-    ) -> Optional[tuple[tuple[str, tuple[Any, ...]], ...]]:
-        if nominal_value_domains is None:
-            return None
-        frozen: list[tuple[str, tuple[Any, ...]]] = []
-        for key, values in nominal_value_domains.items():
-            frozen.append(
-                (
-                    str(key),
-                    tuple(self._to_python_scalar(v) for v in values),
-                )
-            )
-        frozen.sort(key=lambda item: item[0])
-        return tuple(frozen)
-
-    def _source_signature(self, X: Any) -> tuple[Any, ...]:
-        shape = getattr(X, "shape", None)
-        columns = getattr(X, "columns", None)
-        if columns is not None:
-            column_key = tuple(str(v) for v in columns)
-        else:
-            column_key = None
-        dtypes = getattr(X, "dtypes", None)
-        if dtypes is not None:
-            dtype_key = tuple(str(v) for v in list(dtypes))
-        else:
-            arr = np.asarray(X)
-            dtype_key = (str(arr.dtype),)
-        return (type(X).__name__, id(X), shape, column_key, dtype_key)
-
-    def _fit_bundle_cache_key(
-        self,
-        X: Any,
-        *,
-        feature_names: Optional[list[str]],
-        nominal_features: Optional[list[int]],
-        auto_detect_nominal: bool,
-        nominal_value_domains: Optional[dict[Any, list[Any]]],
-    ) -> tuple[Any, ...]:
-        return (
-            "fit_bundle",
-            self._source_signature(X),
-            self._feature_names_key(feature_names),
-            self._nominal_features_key(nominal_features),
-            bool(auto_detect_nominal),
-            self._nominal_domains_key(nominal_value_domains),
-        )
-
-    def _predict_encoding_signature(self) -> tuple[Any, ...]:
-        label_key = tuple(
-            (int(feat), tuple(labels))
-            for feat, labels in sorted(self._fast_nominal_label_maps.items())
-        )
-        unseen_key = tuple(
-            (int(feat), float(value))
-            for feat, value in sorted(self._fast_nominal_unseen_codes.items())
-        )
-        return (
-            tuple(int(v) for v in self._fast_nominal_features),
-            label_key,
-            unseen_key,
-        )
-
-    def _predict_cache_key(self, X: Any, expected_features: int) -> tuple[Any, ...]:
-        return (
-            "predict_data",
-            self._source_signature(X),
-            int(expected_features),
-            self._predict_encoding_signature(),
-        )
+        self._compiled_tree_root: Any = None
 
     def _refresh_fast_predict_metadata(self) -> None:
         self._fast_nominal_feature_set = set(self._fast_nominal_features)
@@ -874,53 +757,9 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
         auto_detect_nominal: bool = False,
         nominal_value_domains: Optional[dict[Any, list[Any]]] = None,
     ) -> dict[str, Any]:
-        cache_key = self._fit_bundle_cache_key(
-            X,
-            feature_names=feature_names,
-            nominal_features=nominal_features,
-            auto_detect_nominal=auto_detect_nominal,
-            nominal_value_domains=nominal_value_domains,
-        )
         y_arr = np.asarray(y)
         if y_arr.ndim != 1:
             y_arr = np.ravel(y_arr)
-        cached = _cache_get(_FIT_BUNDLE_CACHE, cache_key, X)
-        if cached is not None:
-            n_rows = int(getattr(X, "shape", (cached["X"].shape[0],))[0])
-            if n_rows != y_arr.shape[0]:
-                raise ValueError("X and y have inconsistent lengths")
-            self._fast_feature_names = None if cached["feature_names"] is None else list(cached["feature_names"])
-            self._fast_nominal_features = list(cached["nominal_features"])
-            self._fast_feature_count = int(cached["X"].shape[1])
-            self._fast_nominal_domains = {
-                int(feat): list(values)
-                for feat, values in cached["nominal_value_domains"].items()
-            }
-            self._fast_nominal_label_maps = {
-                int(feat): list(labels)
-                for feat, labels in cached["label_maps"].items()
-            }
-            self._fast_nominal_code_maps = {
-                int(feat): dict(code_map)
-                for feat, code_map in cached["code_maps"].items()
-            }
-            self._fast_nominal_unseen_codes = {
-                int(feat): float(value)
-                for feat, value in cached["unseen_codes"].items()
-            }
-            self._refresh_fast_predict_metadata()
-            self._compiled_tree_cache = None
-            return {
-                "X": cached["X"],
-                "y": y_arr,
-                "feature_names": self._fast_feature_names,
-                "nominal_features": list(self._fast_nominal_features),
-                "nominal_value_domains": {
-                    feat: list(values) for feat, values in self._fast_nominal_domains.items()
-                },
-                "auto_detect_nominal": False,
-            }
-
         if self._can_use_object_heavy_fit_path(X, nominal_features, auto_detect_nominal):
             n_rows, n_features = X.shape
             if n_rows != y_arr.shape[0]:
@@ -986,28 +825,6 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                 "nominal_value_domains": resolved_domains,
                 "auto_detect_nominal": False,
             }
-            _cache_put(
-                _FIT_BUNDLE_CACHE,
-                cache_key,
-                X,
-                {
-                    "X": X_fast,
-                    "feature_names": None if self._fast_feature_names is None else list(self._fast_feature_names),
-                    "nominal_features": list(resolved_nominal_features),
-                    "nominal_value_domains": {
-                        int(feat): list(values) for feat, values in resolved_domains.items()
-                    },
-                    "label_maps": {
-                        int(feat): list(labels) for feat, labels in label_maps.items()
-                    },
-                    "code_maps": {
-                        int(feat): dict(code_map) for feat, code_map in code_maps.items()
-                    },
-                    "unseen_codes": {
-                        int(feat): float(value) for feat, value in self._fast_nominal_unseen_codes.items()
-                    },
-                },
-            )
             return bundle
 
         X_arr, y_arr = self.prepare_fit_data(X, y)
@@ -1073,34 +890,10 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
             "nominal_value_domains": resolved_domains,
             "auto_detect_nominal": False,
         }
-        _cache_put(
-            _FIT_BUNDLE_CACHE,
-            cache_key,
-            X,
-            {
-                "X": X_fast,
-                "feature_names": None if self._fast_feature_names is None else list(self._fast_feature_names),
-                "nominal_features": list(resolved_nominal_features),
-                "nominal_value_domains": {
-                    int(feat): list(values) for feat, values in resolved_domains.items()
-                },
-                "label_maps": {
-                    int(feat): list(labels) for feat, labels in label_maps.items()
-                },
-                "code_maps": {
-                    int(feat): dict(code_map) for feat, code_map in code_maps.items()
-                },
-                "unseen_codes": {
-                    int(feat): float(value) for feat, value in self._fast_nominal_unseen_codes.items()
-                },
-            },
-        )
         return bundle
 
     def prepare_predict_data(self, X: Any, expected_features: int) -> np.ndarray:
         self._last_prepare_predict_cache_hit = False
-        self._last_path_details_cache_key = None
-        self._last_path_details_cache_value = None
         is_pandas_2d = (
             pd is not None
             and hasattr(X, "iloc")
@@ -1123,11 +916,6 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                 raise ValueError(
                     f"Expected {expected_features} features, got {X_arr.shape[1]}"
                 )
-        cache_key = self._predict_cache_key(X, expected_features)
-        cached = _cache_get(_PREDICT_DATA_CACHE, cache_key, X)
-        if cached is not None:
-            self._last_prepare_predict_cache_hit = True
-            return cached
 
         if is_pandas_2d:
             nominal_set = self._fast_nominal_feature_set
@@ -1136,7 +924,6 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                 dtypes = list(X.dtypes)
                 if all(np.issubdtype(dtype, np.number) for dtype in dtypes):
                     out = np.ascontiguousarray(X.to_numpy(dtype=np.float64, copy=False))
-                    _cache_put(_PREDICT_DATA_CACHE, cache_key, X, out)
                     return out
                 out = np.empty((n_rows, n_cols), dtype=np.float64)
                 for feat in range(n_cols):
@@ -1145,7 +932,6 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                         out[:, feat] = series.to_numpy(dtype=np.float64, copy=False)
                     else:
                         out[:, feat] = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64, copy=False)
-                _cache_put(_PREDICT_DATA_CACHE, cache_key, X, out)
                 return out
             X_fast = np.empty((n_rows, n_cols), dtype=np.float64)
             if numeric_features:
@@ -1165,7 +951,6 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                     X_fast[:, feat] = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64, copy=False)
             for feat in self._fast_nominal_features:
                 X_fast[:, feat] = self._encode_nominal_series_predict(X.iloc[:, feat], feat)
-            _cache_put(_PREDICT_DATA_CACHE, cache_key, X, X_fast)
             return X_fast
 
         X_fast = np.empty(X_arr.shape, dtype=np.float64)
@@ -1181,17 +966,9 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
         for feat in self._fast_nominal_features:
             raw_col = X_arr[:, feat]
             X_fast[:, feat] = self._encode_nominal_values_predict_factorized(raw_col, feat)
-        _cache_put(_PREDICT_DATA_CACHE, cache_key, X, X_fast)
         return X_fast
 
     def _fast_predict_path_details(self, X: np.ndarray, estimator: Any) -> dict[str, Any]:
-        cache_key = (
-            id(X),
-            X.shape,
-            bool(getattr(estimator, "enable_fractional_missing", False)),
-        )
-        if self._last_path_details_cache_key == cache_key and self._last_path_details_cache_value is not None:
-            return dict(self._last_path_details_cache_value)
         details = {
             "engine_numba_available": bool(ENGINE_NUMBA_AVAILABLE),
             "fractional_missing_enabled": bool(getattr(estimator, "enable_fractional_missing", False)),
@@ -1250,8 +1027,6 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                 ),
             }
         )
-        self._last_path_details_cache_key = cache_key
-        self._last_path_details_cache_value = dict(details)
         return details
 
     def _compile_tree(self, estimator: Any) -> dict[str, Any]:
@@ -1274,7 +1049,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                 "edge_children": np.zeros(0, dtype=np.int32),
                 "edge_probs": np.zeros(0, dtype=np.float64),
                 "leaf_pred_idx": np.zeros(0, dtype=np.int32),
-                "leaf_proba": np.zeros((0, estimator.n_classes_), dtype=np.float32),
+                "leaf_proba": np.zeros((0, estimator.n_classes_), dtype=np.float64),
             }
 
         split_type: list[int] = []
@@ -1304,16 +1079,16 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                 total = float(np.sum(counts))
                 if total > 0.0:
                     if bool(getattr(estimator, "use_laplace", False)):
-                        return ((counts + 1.0) / (total + float(n_classes))).astype(np.float32, copy=False)
-                    return (counts / total).astype(np.float32, copy=False)
+                        return ((counts + 1.0) / (total + float(n_classes))).astype(np.float64, copy=False)
+                    return (counts / total).astype(np.float64, copy=False)
             if prob_counts is not None:
                 prob_counts = np.asarray(prob_counts, dtype=np.float64)
                 total = float(np.sum(prob_counts))
                 if total > 0.0:
                     if bool(getattr(estimator, "use_laplace", False)):
-                        return ((prob_counts + 1.0) / (total + float(n_classes))).astype(np.float32, copy=False)
-                    return (prob_counts / total).astype(np.float32, copy=False)
-            dist = np.zeros(n_classes, dtype=np.float32)
+                        return ((prob_counts + 1.0) / (total + float(n_classes))).astype(np.float64, copy=False)
+                    return (prob_counts / total).astype(np.float64, copy=False)
+            dist = np.zeros(n_classes, dtype=np.float64)
             pred_idx = getattr(node, "prediction_idx", None)
             if pred_idx is None:
                 dist[:] = 1.0 / float(n_classes)
@@ -1346,7 +1121,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
             if node.is_leaf:
                 proba = leaf_distribution(node)
             else:
-                proba = np.zeros(estimator.n_classes_, dtype=np.float32)
+                proba = np.zeros(estimator.n_classes_, dtype=np.float64)
             leaf_proba.append(proba)
 
             if node.is_leaf:
@@ -1430,12 +1205,15 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
             "edge_children": np.asarray(edge_children, dtype=np.int32),
             "edge_probs": np.asarray(edge_probs, dtype=np.float64),
             "leaf_pred_idx": np.asarray(leaf_pred_idx, dtype=np.int32),
-            "leaf_proba": np.asarray(leaf_proba, dtype=np.float32),
+            "leaf_proba": np.asarray(leaf_proba, dtype=np.float64),
         }
 
     def _ensure_compiled_tree(self, estimator: Any) -> dict[str, Any]:
-        if self._compiled_tree_cache is None:
+        # Recompile whenever the estimator holds a different tree (e.g. after
+        # a refit through `fit_prepared_bundle`, which reuses this engine).
+        if self._compiled_tree_cache is None or self._compiled_tree_root is not estimator.root_:
             self._compiled_tree_cache = self._compile_tree(estimator)
+            self._compiled_tree_root = estimator.root_
         return self._compiled_tree_cache
 
     def _restore_nominal_value(self, feature_index: Optional[int], raw_value: Any) -> Any:
@@ -1497,7 +1275,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
         if ENGINE_NUMBA_AVAILABLE:
             compiled = self._ensure_compiled_tree(estimator)
             if compiled["split_type"].size == 0:
-                return np.array([], dtype=object)
+                return estimator.classes_[:0]
             terminal = _predict_terminal_nodes_numba(
                 X,
                 compiled["split_type"],
@@ -1517,7 +1295,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
 
         root = estimator.root_
         if root is None:
-            return np.array([], dtype=object)
+            return estimator.classes_[:0]
 
         out_idx = np.empty(X.shape[0], dtype=np.int32)
         for row_idx in range(X.shape[0]):
@@ -1552,7 +1330,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
     def predict_proba_fast(self, X: np.ndarray, estimator: Any) -> np.ndarray:
         compiled = self._ensure_compiled_tree(estimator)
         if compiled["split_type"].size == 0:
-            return np.zeros((0, estimator.n_classes_), dtype=np.float32)
+            return np.zeros((0, estimator.n_classes_), dtype=np.float64)
         details = self._fast_predict_path_details(X, estimator)
         if details["uses_missing_aware_traversal"]:
             proba = _predict_proba_nodes_numba(
@@ -1578,7 +1356,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
             row_sums = np.sum(proba, axis=1)
             zero_rows = row_sums == 0.0
             if np.any(zero_rows):
-                proba[zero_rows] = np.float32(1.0 / float(estimator.n_classes_))
+                proba[zero_rows] = np.float64(1.0 / float(estimator.n_classes_))
             return proba
 
         terminal = _predict_terminal_nodes_numba(
