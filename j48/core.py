@@ -1115,35 +1115,49 @@ class C45TreeClassifier:
             return [self._normalize_nominal_value(v) for v in ordered.tolist()]
         return list(dict.fromkeys(self._normalize_nominal_value(v) for v in arr.tolist()))
 
-    @staticmethod
-    def _nominal_value_positions(values: np.ndarray, value_order: list[Any]) -> Optional[np.ndarray]:
+    def _nominal_value_positions(self, values: np.ndarray, value_order: list[Any]) -> np.ndarray:
         """
-        Position of each value in `value_order`, computed in one vectorized
-        pass for numeric-coded nominal columns (the encoded fast backend).
+        Index of each value in `value_order` (-1 when it matches none).
 
-        Returns None whenever the result would not be exactly what per-value
-        equality masks give (non-numeric data, non-numeric or duplicated
-        domain values, or a value outside the domain); callers then fall back
-        to `_nominal_match_mask`.
+        Equality follows `_nominal_match_mask`. Both backends use this single
+        mapping and then the same `bincount`-based sums, so the strict line
+        (object values) and the fast line (integer codes) perform identical
+        floating-point operations and break exact ties the same way.
         """
         arr = np.asarray(values)
-        if arr.dtype.kind not in "biuf" or not value_order:
-            return None
+        n = arr.shape[0]
+        if not value_order or n == 0:
+            return np.full(n, -1, dtype=np.int64)
         domain = np.asarray(value_order)
-        if domain.ndim != 1 or domain.dtype.kind not in "iuf":
-            return None
-        domain = domain.astype(np.float64, copy=False)
-        if not np.all(np.isfinite(domain)):
-            return None
-        sorter = np.argsort(domain, kind="stable")
-        sorted_domain = domain[sorter]
-        if sorted_domain.size > 1 and np.any(sorted_domain[1:] == sorted_domain[:-1]):
-            return None
-        arr_f = arr.astype(np.float64, copy=False)
-        slots = np.clip(np.searchsorted(sorted_domain, arr_f), 0, sorted_domain.size - 1)
-        if not np.array_equal(sorted_domain[slots], arr_f):
-            return None
-        return sorter[slots]
+        if (
+            arr.dtype.kind in "biuf"
+            and domain.ndim == 1
+            and domain.dtype.kind in "iuf"
+            and np.all(np.isfinite(domain.astype(np.float64)))
+        ):
+            domain_f = domain.astype(np.float64)
+            sorter = np.argsort(domain_f, kind="stable")
+            sorted_domain = domain_f[sorter]
+            if sorted_domain.size < 2 or not np.any(sorted_domain[1:] == sorted_domain[:-1]):
+                arr_f = arr.astype(np.float64, copy=False)
+                slots = np.clip(np.searchsorted(sorted_domain, arr_f), 0, sorted_domain.size - 1)
+                return np.where(sorted_domain[slots] == arr_f, sorter[slots], -1).astype(np.int64)
+        try:
+            slot_of: dict[Any, int] = {}
+            for i, value in enumerate(value_order):
+                slot_of.setdefault(value, i)
+            return np.fromiter(
+                (slot_of.get(self._normalize_nominal_value(v), -1) for v in arr.tolist()),
+                dtype=np.int64,
+                count=n,
+            )
+        except TypeError:
+            # Unhashable values: fall back to one equality mask per value.
+            positions = np.full(n, -1, dtype=np.int64)
+            for i, value in enumerate(value_order):
+                mask = self._nominal_match_mask(arr, value) & (positions < 0)
+                positions[mask] = i
+            return positions
 
     def _nominal_match_mask(self, values: np.ndarray, target_value: Any) -> np.ndarray:
         arr = np.asarray(values)
@@ -1689,44 +1703,23 @@ class C45TreeClassifier:
         branch_weights: list[float] = []
         branch_counts: list[np.ndarray] = []
         min_leaf = float(self.min_samples_leaf)
+        # Every known value is in `value_order` (domain + observed values).
         positions = self._nominal_value_positions(x_valid, value_order)
-        if positions is not None:
-            n_values = len(value_order)
-            weight_per_value = np.bincount(positions, weights=w_valid, minlength=n_values)
-            counts_per_value = np.bincount(
-                positions * self.n_classes_ + y_valid,
-                weights=w_valid,
-                minlength=n_values * self.n_classes_,
-            ).reshape(n_values, self.n_classes_)
-            for i, value in enumerate(value_order):
-                branch_values.append(value)
-                if weight_per_value[i] <= 1e-12:
-                    branch_weights.append(0.0)
-                    branch_counts.append(np.zeros(self.n_classes_, dtype=np.float64))
-                else:
-                    branch_weights.append(float(weight_per_value[i]))
-                    branch_counts.append(counts_per_value[i])
-            value_order = []
-        for value in value_order:
-            branch_mask = self._nominal_match_mask(x_valid, value)
+        n_values = len(value_order)
+        weight_per_value = np.bincount(positions, weights=w_valid, minlength=n_values)
+        counts_per_value = np.bincount(
+            positions * self.n_classes_ + y_valid,
+            weights=w_valid,
+            minlength=n_values * self.n_classes_,
+        ).reshape(n_values, self.n_classes_)
+        for i, value in enumerate(value_order):
             branch_values.append(value)
-            if not np.any(branch_mask):
+            if weight_per_value[i] <= 1e-12:
                 branch_weights.append(0.0)
                 branch_counts.append(np.zeros(self.n_classes_, dtype=np.float64))
-                continue
-            branch_weight = float(np.sum(w_valid[branch_mask]))
-            if branch_weight <= 1e-12:
-                branch_weights.append(0.0)
-                branch_counts.append(np.zeros(self.n_classes_, dtype=np.float64))
-                continue
-            branch_weights.append(branch_weight)
-            branch_counts.append(
-                np.bincount(
-                    y_valid[branch_mask],
-                    weights=w_valid[branch_mask],
-                    minlength=self.n_classes_,
-                ).astype(np.float64, copy=False)
-            )
+            else:
+                branch_weights.append(float(weight_per_value[i]))
+                branch_counts.append(counts_per_value[i])
 
         if len(branch_values) <= 1:
             return None
@@ -1802,14 +1795,13 @@ class C45TreeClassifier:
         if len(value_order) <= 1:
             return None
         positions = self._nominal_value_positions(x_valid, value_order)
-        if positions is not None:
-            weight_per_value = np.bincount(positions, weights=w_valid, minlength=len(value_order))
-            counts_per_value = np.bincount(
-                positions * self.n_classes_ + y_valid,
-                weights=w_valid,
-                minlength=len(value_order) * self.n_classes_,
-            ).reshape(len(value_order), self.n_classes_)
-            rows_per_value = np.bincount(positions, minlength=len(value_order))
+        weight_per_value = np.bincount(positions, weights=w_valid, minlength=len(value_order))
+        counts_per_value = np.bincount(
+            positions * self.n_classes_ + y_valid,
+            weights=w_valid,
+            minlength=len(value_order) * self.n_classes_,
+        ).reshape(len(value_order), self.n_classes_)
+        rows_per_value = np.bincount(positions, minlength=len(value_order))
 
         min_leaf = float(self.min_samples_leaf)
         feat_counts = np.bincount(
@@ -1822,27 +1814,14 @@ class C45TreeClassifier:
         best_rank: Optional[tuple[float, float, float, int]] = None
 
         for value_idx, value in enumerate(value_order):
-            if positions is not None:
-                if rows_per_value[value_idx] == 0 or rows_per_value[value_idx] == positions.size:
-                    continue
-                pos_weight = float(weight_per_value[value_idx])
-            else:
-                branch_mask = self._nominal_match_mask(x_valid, value)
-                if not np.any(branch_mask) or np.all(branch_mask):
-                    continue
-                pos_weight = float(np.sum(w_valid[branch_mask]))
+            if rows_per_value[value_idx] == 0 or rows_per_value[value_idx] == positions.size:
+                continue
+            pos_weight = float(weight_per_value[value_idx])
             neg_weight = known_weight - pos_weight
             if pos_weight < min_leaf - 1e-12 or neg_weight < min_leaf - 1e-12:
                 continue
 
-            if positions is not None:
-                pos_counts = counts_per_value[value_idx]
-            else:
-                pos_counts = np.bincount(
-                    y_valid[branch_mask],
-                    weights=w_valid[branch_mask],
-                    minlength=self.n_classes_,
-                ).astype(np.float64, copy=False)
+            pos_counts = counts_per_value[value_idx]
             neg_counts = feat_counts - pos_counts
 
             child_entropy = (
@@ -2158,10 +2137,7 @@ class C45TreeClassifier:
             explicit_values = [value for value in best["values"] if value != _NOMINAL_OTHER_BRANCH]
             value_positions = self._nominal_value_positions(known_values, explicit_values)
             for value_idx, value in enumerate(explicit_values):
-                if value_positions is not None:
-                    branch_mask = value_positions == value_idx
-                else:
-                    branch_mask = self._nominal_match_mask(known_values, value)
+                branch_mask = value_positions == value_idx
                 if np.any(branch_mask):
                     branch_idx_parts[value].append(known_idx[branch_mask])
                     branch_w_parts[value].append(known_w[branch_mask])
