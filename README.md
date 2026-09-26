@@ -74,7 +74,8 @@ Optional extras:
 
 - `analysis`: installs `pandas` and `scipy`
 - `fast`: installs `numba`
-- `all`: installs all optional dependencies
+- `test`: installs `pytest` (and `pandas`) to run the test suite
+- `all`: installs `pandas`, `scipy` and `numba`
 
 Quick smoke test:
 
@@ -104,6 +105,15 @@ pred = clf.predict(X)
 proba = clf.predict_proba(X)
 tree_stats = clf.get_tree_stats()
 ```
+
+## Running the tests
+
+```bash
+python -m pip install -e ".[all,test]"
+python -m pytest
+```
+
+The suite covers the regressions fixed in each release and checks that `J48FastClassifier` reproduces `J48Classifier` (trees, predictions and probabilities) across the main J48 configurations.
 
 ## Validation and paper context
 
@@ -138,6 +148,8 @@ Javier Maldonado. *j48-python-backend*. GitHub repository. Versioned software ar
 The public artifact is intended to be consumed through tagged releases.
 
 For manuscript alignment, cite the exact tag and commit used by the paper instead of the moving default branch.
+
+The current release is `0.2.0`, a correctness release: on ordinary inputs it builds the same trees as `0.1.x`, but it fixes defects that affected scikit-learn metric compatibility, in-place modified inputs in the fast backend, and integer features above 2^24 in the strict line. See [CHANGELOG.md](CHANGELOG.md) for the exact scope of each change.
 
 ## Status
 

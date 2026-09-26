@@ -1,13 +1,11 @@
+"""
+Core J48-targeting implementation.
+
+The code in this module is the strict baseline engine aligned with WEKA J48.
+Faster execution backends live in `j48.engine` and reuse this tree builder.
+"""
+
 from __future__ import annotations
-
-"""
-Core J48-targeting implementation used by the experimental tree package.
-
-The code in this module is the baseline engine under alignment with WEKA J48.
-It remains intentionally isolated from the stable project classifier path so
-fidelity work and future performance backends can evolve without breaking the
-existing C4.5 implementation used elsewhere in the repository.
-"""
 
 import copy
 import json
@@ -234,8 +232,8 @@ def _binary_entropy_from_positive_weight(positive_weight: np.ndarray, total_weig
     """
     Vectorized binary entropy from positive-class weight and total row weight.
 
-    Used to accelerate numeric-threshold evaluation in binary problems.
-    binarios, evitando construir una matriz one-hot completa.
+    Used to accelerate numeric-threshold evaluation in binary problems
+    without building a full one-hot matrix.
     """
     positive_weight = np.asarray(positive_weight, dtype=np.float64)
     total_weight = np.asarray(total_weight, dtype=np.float64)
@@ -916,7 +914,8 @@ class C45TreeClassifier:
     max_thresholds : int, optional, default=100
         Maximum number of threshold candidates to evaluate per feature.
         If None, evaluates all midpoints (closer to original C4.5, but slower).
-        Typical values are 50-200 for a speed/precision balance.
+        Typical values are 50-200 for a speed/precision balance. The public
+        `J48Classifier` wrappers default to None to match J48.
         
     random_state : int, optional
         Random seed for reproducibility.
@@ -942,7 +941,7 @@ class C45TreeClassifier:
     
     Examples
     --------
-    >>> from EvLib.c45 import C45TreeClassifier
+    >>> from j48 import C45TreeClassifier
     >>> import numpy as np
     >>> X = np.array([[0, 0], [1, 1]])
     >>> y = np.array([0, 1])
@@ -1014,7 +1013,7 @@ class C45TreeClassifier:
         self.gain_prefilter_slack = float(gain_prefilter_slack)
         self.use_numba_numeric_kernel = bool(use_numba_numeric_kernel)
 
-        # Atributos a llenar durante fit()
+        # Attributes populated by fit().
         self.n_classes_: Optional[int] = None
         self.classes_: Optional[np.ndarray] = None
         self.n_features_: Optional[int] = None
@@ -1307,7 +1306,7 @@ class C45TreeClassifier:
         if not self._matrix_can_stay_numeric(X, nominal_hint):
             X = np.asarray(X, dtype=object)
         elif not np.issubdtype(X.dtype, np.floating):
-            X = X.astype(np.float32, copy=False)
+            X = X.astype(np.float64, copy=False)
         y = np.asarray(y)
 
         self._rng_ = np.random.RandomState(self.random_state)
@@ -1328,8 +1327,13 @@ class C45TreeClassifier:
             self._log2_lut_[1:] = np.log2(np.arange(1, n_samples + 1, dtype=np.float64))
 
         # Encode classes as consecutive integers 0, 1, 2, ...
+        # Keep the native label dtype (as scikit-learn does) so predictions
+        # remain usable by `sklearn.metrics`; only object labels are
+        # normalized to plain Python scalars.
         self.classes_, y_encoded = np.unique(y, return_inverse=True)
-        self.classes_ = np.asarray([_to_python_scalar(v) for v in self.classes_.tolist()], dtype=object)
+        y_encoded = np.asarray(y_encoded).reshape(-1)
+        if self.classes_.dtype == object:
+            self.classes_ = np.asarray([_to_python_scalar(v) for v in self.classes_.tolist()], dtype=object)
         self.n_classes_ = self.classes_.shape[0]
         self._train_y_encoded_ = y_encoded
 
@@ -3119,11 +3123,11 @@ class C45TreeClassifier:
         if not self._matrix_can_stay_numeric(X, bool(self._nominal_features_)):
             X = np.asarray(X, dtype=object)
         elif not np.issubdtype(X.dtype, np.floating):
-            X = X.astype(np.float32, copy=False)
+            X = X.astype(np.float64, copy=False)
         n_samples = X.shape[0]
         
         if n_samples == 0:
-            return np.array([])
+            return self.classes_[:0]
 
         if self.enable_fractional_missing and (self._matrix_has_missing(X) or bool(self._nominal_features_)):
             # When missing values are present and fractional mode is active,
@@ -3167,9 +3171,9 @@ class C45TreeClassifier:
             return
 
         if weights is None:
-            weights = np.ones(indices.size, dtype=np.float32)
+            weights = np.ones(indices.size, dtype=np.float64)
         else:
-            weights = weights.astype(np.float32, copy=False)
+            weights = weights.astype(np.float64, copy=False)
         
         # Base case: leaf node.
         if node.is_leaf:
@@ -3181,9 +3185,9 @@ class C45TreeClassifier:
                         dist = (
                             (leaf_counts + 1.0)
                             / (counts_sum + float(self.n_classes_))
-                        ).astype(np.float32, copy=False)
+                        ).astype(np.float64, copy=False)
                     else:
-                        dist = (leaf_counts / counts_sum).astype(np.float32, copy=False)
+                        dist = (leaf_counts / counts_sum).astype(np.float64, copy=False)
                 elif node.probability_counts is not None:
                     prob_counts = node.probability_counts.astype(np.float64, copy=False)
                     prob_sum = float(prob_counts.sum())
@@ -3192,26 +3196,26 @@ class C45TreeClassifier:
                             dist = (
                                 (prob_counts + 1.0)
                                 / (prob_sum + float(self.n_classes_))
-                            ).astype(np.float32, copy=False)
+                            ).astype(np.float64, copy=False)
                         else:
-                            dist = (prob_counts / prob_sum).astype(np.float32, copy=False)
+                            dist = (prob_counts / prob_sum).astype(np.float64, copy=False)
                     elif node.prediction_idx is not None:
-                        dist = np.zeros(self.n_classes_, dtype=np.float32)
+                        dist = np.zeros(self.n_classes_, dtype=np.float64)
                         dist[int(node.prediction_idx)] = 1.0
                     else:
-                        dist = np.full(self.n_classes_, 1.0 / self.n_classes_, dtype=np.float32)
+                        dist = np.full(self.n_classes_, 1.0 / self.n_classes_, dtype=np.float64)
                 elif node.prediction_idx is not None:
-                    dist = np.zeros(self.n_classes_, dtype=np.float32)
+                    dist = np.zeros(self.n_classes_, dtype=np.float64)
                     dist[int(node.prediction_idx)] = 1.0
                 else:
                     # Fallback: uniform distribution.
-                    dist = np.full(self.n_classes_, 1.0 / self.n_classes_, dtype=np.float32)
+                    dist = np.full(self.n_classes_, 1.0 / self.n_classes_, dtype=np.float64)
             else:
                 if node.prediction_idx is not None:
-                    dist = np.zeros(self.n_classes_, dtype=np.float32)
+                    dist = np.zeros(self.n_classes_, dtype=np.float64)
                     dist[int(node.prediction_idx)] = 1.0
                 else:
-                    dist = np.full(self.n_classes_, 1.0 / self.n_classes_, dtype=np.float32)
+                    dist = np.full(self.n_classes_, 1.0 / self.n_classes_, dtype=np.float64)
             proba[indices] += weights[:, None] * dist[None, :]
             return
         
@@ -3337,11 +3341,11 @@ class C45TreeClassifier:
         if not self._matrix_can_stay_numeric(X, bool(self._nominal_features_)):
             X = np.asarray(X, dtype=object)
         elif not np.issubdtype(X.dtype, np.floating):
-            X = X.astype(np.float32, copy=False)
+            X = X.astype(np.float64, copy=False)
         n_samples = X.shape[0]
         
         # Initialize the probability array.
-        proba = np.zeros((n_samples, self.n_classes_), dtype=np.float32)
+        proba = np.zeros((n_samples, self.n_classes_), dtype=np.float64)
         
         if n_samples == 0:
             return proba
