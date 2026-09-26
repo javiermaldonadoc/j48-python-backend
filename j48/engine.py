@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
+
+from .core import _weka_max_index
 try:
     from numba import njit
     ENGINE_NUMBA_AVAILABLE = True
@@ -285,17 +287,19 @@ if ENGINE_NUMBA_AVAILABLE:
                         continue
 
                     if fractional_missing:
+                        # Push right first so the left branch is accumulated
+                        # first, in the same order as the strict line.
                         lp = np.float64(left_prob[node])
                         rp = np.float64(1.0) - lp
-                        child = left_child[node]
-                        if child >= 0 and lp > 0.0:
-                            node_stack[stack_size] = child
-                            weight_stack[stack_size] = weight * lp
-                            stack_size += 1
                         child = right_child[node]
                         if child >= 0 and rp > 0.0:
                             node_stack[stack_size] = child
                             weight_stack[stack_size] = weight * rp
+                            stack_size += 1
+                        child = left_child[node]
+                        if child >= 0 and lp > 0.0:
+                            node_stack[stack_size] = child
+                            weight_stack[stack_size] = weight * lp
                             stack_size += 1
                         continue
 
@@ -331,7 +335,9 @@ if ENGINE_NUMBA_AVAILABLE:
                     continue
 
                 if fractional_missing:
-                    for edge_idx in range(start, end):
+                    # Reverse push order: branches are accumulated in edge
+                    # order, as in the strict line.
+                    for edge_idx in range(end - 1, start - 1, -1):
                         child = edge_children[edge_idx]
                         prob = np.float64(edge_probs[edge_idx])
                         if child >= 0 and prob > 0.0:
@@ -1062,6 +1068,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                 "edge_probs": np.zeros(0, dtype=np.float64),
                 "leaf_pred_idx": np.zeros(0, dtype=np.int32),
                 "leaf_proba": np.zeros((0, estimator.n_classes_), dtype=np.float64),
+                "leaf_proba_raw": np.zeros((0, estimator.n_classes_), dtype=np.float64),
             }
 
         split_type: list[int] = []
@@ -1078,11 +1085,12 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
         edge_ends: list[int] = []
         leaf_pred_idx: list[int] = []
         leaf_proba: list[np.ndarray] = []
+        leaf_proba_raw: list[np.ndarray] = []
         edge_values: list[int] = []
         edge_children: list[int] = []
         edge_probs: list[float] = []
 
-        def leaf_distribution(node: Any) -> np.ndarray:
+        def leaf_distribution(node: Any, laplace: bool) -> np.ndarray:
             counts = getattr(node, "class_counts", None)
             prob_counts = getattr(node, "probability_counts", None)
             n_classes = int(estimator.n_classes_)
@@ -1090,14 +1098,14 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                 counts = np.asarray(counts, dtype=np.float64)
                 total = float(np.sum(counts))
                 if total > 0.0:
-                    if bool(getattr(estimator, "use_laplace", False)):
+                    if laplace:
                         return ((counts + 1.0) / (total + float(n_classes))).astype(np.float64, copy=False)
                     return (counts / total).astype(np.float64, copy=False)
             if prob_counts is not None:
                 prob_counts = np.asarray(prob_counts, dtype=np.float64)
                 total = float(np.sum(prob_counts))
                 if total > 0.0:
-                    if bool(getattr(estimator, "use_laplace", False)):
+                    if laplace:
                         return ((prob_counts + 1.0) / (total + float(n_classes))).astype(np.float64, copy=False)
                     return (prob_counts / total).astype(np.float64, copy=False)
             dist = np.zeros(n_classes, dtype=np.float64)
@@ -1131,10 +1139,14 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
             edge_ends.append(0)
             leaf_pred_idx.append(0 if node.prediction_idx is None else int(node.prediction_idx))
             if node.is_leaf:
-                proba = leaf_distribution(node)
+                use_laplace = bool(getattr(estimator, "use_laplace", False))
+                proba = leaf_distribution(node, use_laplace)
+                proba_raw = leaf_distribution(node, False) if use_laplace else proba
             else:
                 proba = np.zeros(estimator.n_classes_, dtype=np.float64)
+                proba_raw = proba
             leaf_proba.append(proba)
+            leaf_proba_raw.append(proba_raw)
 
             if node.is_leaf:
                 continue
@@ -1218,12 +1230,19 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
             "edge_probs": np.asarray(edge_probs, dtype=np.float64),
             "leaf_pred_idx": np.asarray(leaf_pred_idx, dtype=np.int32),
             "leaf_proba": np.asarray(leaf_proba, dtype=np.float64),
+            "leaf_proba_raw": np.asarray(leaf_proba_raw, dtype=np.float64),
         }
 
     def _ensure_compiled_tree(self, estimator: Any) -> dict[str, Any]:
         # Recompile whenever the estimator holds a different tree (e.g. after
         # a refit through `fit_prepared_bundle`, which reuses this engine).
-        if self._compiled_tree_cache is None or self._compiled_tree_root is not estimator.root_:
+        # Also recompile caches that predate a compiled field (unpickled
+        # models from an older release).
+        if (
+            self._compiled_tree_cache is None
+            or self._compiled_tree_root is not estimator.root_
+            or "leaf_proba_raw" not in self._compiled_tree_cache
+        ):
             self._compiled_tree_cache = self._compile_tree(estimator)
             self._compiled_tree_root = estimator.root_
         return self._compiled_tree_cache
@@ -1281,9 +1300,11 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
     def hard_predict(self, X: np.ndarray, estimator: Any) -> np.ndarray:
         details = self._fast_predict_path_details(X, estimator)
         if details["requires_proba_mixture"]:
-            proba = self.predict_proba_fast(X, estimator)
-            pred_idx = self.stable_argmax_from_proba(proba)
-            return estimator.classes_[pred_idx]
+            # WEKA's J48.classifyInstance: the class comes from the
+            # distribution without Laplace smoothing, choosing the first
+            # class on (near-)ties, exactly as the strict line does.
+            proba = self.predict_proba_fast(X, estimator, laplace=False)
+            return estimator.classes_[_weka_max_index(proba)]
         if ENGINE_NUMBA_AVAILABLE:
             compiled = self._ensure_compiled_tree(estimator)
             if compiled["split_type"].size == 0:
@@ -1339,8 +1360,10 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
     def can_use_fast_predict_proba(self, X: np.ndarray, estimator: Any) -> bool:
         return bool(self._fast_predict_path_details(X, estimator)["fast_path"])
 
-    def predict_proba_fast(self, X: np.ndarray, estimator: Any) -> np.ndarray:
+    def predict_proba_fast(self, X: np.ndarray, estimator: Any, laplace: Optional[bool] = None) -> np.ndarray:
         compiled = self._ensure_compiled_tree(estimator)
+        use_laplace = bool(getattr(estimator, "use_laplace", False)) if laplace is None else bool(laplace)
+        leaf_proba = compiled["leaf_proba"] if use_laplace else compiled["leaf_proba_raw"]
         if compiled["split_type"].size == 0:
             return np.zeros((0, estimator.n_classes_), dtype=np.float64)
         details = self._fast_predict_path_details(X, estimator)
@@ -1362,7 +1385,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                 compiled["edge_values"],
                 compiled["edge_children"],
                 compiled["edge_probs"],
-                compiled["leaf_proba"],
+                leaf_proba,
                 bool(getattr(estimator, "enable_fractional_missing", False)),
             )
             row_sums = np.sum(proba, axis=1)
@@ -1386,7 +1409,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
             compiled["edge_values"],
             compiled["edge_children"],
         )
-        return compiled["leaf_proba"][terminal]
+        return leaf_proba[terminal]
 
     def describe_hard_predict_path(self, X: np.ndarray, estimator: Any) -> dict[str, Any]:
         return self._fast_predict_path_details(X, estimator)

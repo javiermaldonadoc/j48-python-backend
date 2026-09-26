@@ -25,9 +25,30 @@ except Exception:  # pragma: no cover - optional acceleration dependency
 logger = logging.getLogger(__name__)
 
 _NOMINAL_OTHER_BRANCH = "__WEKA_OTHER__"
+# weka.core.Utils.SMALL: tolerance used by WEKA's gr/sm/eq comparisons.
+_WEKA_SMALL = 1e-6
+
 _EMPTY_INT32 = np.empty(0, dtype=np.int32)
 _EMPTY_FLOAT64 = np.empty(0, dtype=np.float64)
 _EMPTY_WEIGHTED_PAIR = (_EMPTY_INT32, _EMPTY_FLOAT64)
+
+
+def _weka_max_index(proba: np.ndarray) -> np.ndarray:
+    """
+    Row-wise class choice of WEKA's ``ClassifierTree.classifyInstance``:
+    scanning the classes in order, a class replaces the current best only if
+    its probability is larger by more than ``Utils.SMALL``. Exact and
+    near-exact ties therefore go to the first class, independently of
+    floating-point rounding.
+    """
+    n_rows, n_classes = proba.shape
+    best = np.full(n_rows, -1.0, dtype=np.float64)
+    idx = np.zeros(n_rows, dtype=np.intp)
+    for j in range(n_classes):
+        take = proba[:, j] > best + _WEKA_SMALL
+        idx[take] = j
+        best[take] = proba[take, j]
+    return idx
 
 
 def _as_int32_array(value: Any) -> np.ndarray:
@@ -321,6 +342,9 @@ if NUMBA_AVAILABLE:
                 total_pos += wi
 
         min_split = min(25.0, max(min_leaf, 0.1 * (known_weight / max(float(n_classes), 1.0))))
+        # WEKA: enough instances (a count, not a weight) with known values?
+        if float(n) < 2.0 * min_split - 1e-6:
+            return (0, -1, 0.0, 0.0, 0.0, 0.0, 0.0, 0, known_weight)
         valid_positions = np.empty(n - 1, dtype=np.int32)
         left_weights = np.empty(n - 1, dtype=np.float64)
         left_pos_weights = np.empty(n - 1, dtype=np.float64)
@@ -334,7 +358,8 @@ if NUMBA_AVAILABLE:
                 prefix_pos += wi
             if x_sorted[i] + 1e-5 < x_sorted[i + 1]:
                 right_weight = known_weight - prefix_weight
-                if prefix_weight >= min_split - 1e-12 and right_weight >= min_split - 1e-12:
+                # WEKA: Utils.grOrEq(perBag, minSplit) for both bags.
+                if prefix_weight > min_split - 1e-6 and right_weight > min_split - 1e-6:
                     valid_positions[count] = i
                     left_weights[count] = prefix_weight
                     left_pos_weights[count] = prefix_pos
@@ -344,7 +369,7 @@ if NUMBA_AVAILABLE:
             return (0, -1, 0.0, 0.0, 0.0, 0.0, 0.0, 0, known_weight)
 
         feat_entropy = _binary_entropy_scalar_numba(total_pos, known_weight)
-        best_info_gain = -1.0
+        best_info_gain = 0.0
         best_pos = -1
         best_left = 0.0
         best_right = 0.0
@@ -371,20 +396,26 @@ if NUMBA_AVAILABLE:
             h_right = _binary_entropy_scalar_numba(right_pos, right_weight)
             child_entropy = ((left_weight / known_weight) * h_left) + ((right_weight / known_weight) * h_right)
             info_gain = (known_weight / total_weight) * (feat_entropy - child_entropy)
-            if info_gain > best_info_gain:
+            # WEKA: gains whose numerator is within Utils.SMALL of zero are
+            # zero, and a later threshold must beat the best by more than
+            # Utils.SMALL (Utils.gr), so near-ties keep the first threshold.
+            if abs(info_gain * known_weight) < 1e-6:
+                info_gain = 0.0
+            if info_gain > best_info_gain + 1e-6:
                 best_info_gain = info_gain
                 best_pos = pos_idx
                 best_left = left_weight
                 best_right = right_weight
 
-        if best_info_gain <= 0.0:
+        if best_pos < 0:
             return (0, -1, 0.0, 0.0, 0.0, 0.0, 0.0, count, known_weight)
 
         if use_mdl_correction and count > 1:
             info_gain_adj = best_info_gain - (np.log2(float(count)) / total_weight)
         else:
             info_gain_adj = best_info_gain
-        if info_gain_adj <= 0.0:
+        # WEKA: Utils.smOrEq(infoGain, 0) means no split.
+        if info_gain_adj < 1e-6:
             return (0, -1, best_info_gain, info_gain_adj, 0.0, best_left, best_right, count, known_weight)
 
         missing_weight = total_weight - known_weight
@@ -398,13 +429,8 @@ if NUMBA_AVAILABLE:
             intrinsic -= p_right * np.log2(p_right)
         if p_missing > 0.0:
             intrinsic -= p_missing * np.log2(p_missing)
-        if intrinsic <= 0.0:
-            return (0, -1, best_info_gain, info_gain_adj, intrinsic, best_left, best_right, count, known_weight)
-
-        gain_ratio = info_gain_adj / intrinsic
-        if gain_ratio <= 0.0:
-            return (0, -1, best_info_gain, info_gain_adj, intrinsic, best_left, best_right, count, known_weight)
-
+        # A trivial split (zero split information) still counts towards the
+        # average gain, with a gain ratio of zero, as in WEKA.
         return (1, best_pos, best_info_gain, info_gain_adj, intrinsic, best_left, best_right, count, known_weight)
 
 
@@ -450,6 +476,9 @@ if NUMBA_AVAILABLE:
             feat_counts[y_sorted[i]] += wi
 
         min_split = min(25.0, max(min_leaf, 0.1 * (known_weight / max(float(n_classes), 1.0))))
+        # WEKA: enough instances (a count, not a weight) with known values?
+        if float(n) < 2.0 * min_split - 1e-6:
+            return (0, -1, 0.0, 0.0, 0.0, 0.0, 0.0, 0, known_weight)
         valid_positions = np.empty(n - 1, dtype=np.int32)
         left_weights = np.empty(n - 1, dtype=np.float64)
         left_counts_store = np.zeros((n - 1, n_classes), dtype=np.float64)
@@ -462,7 +491,8 @@ if NUMBA_AVAILABLE:
             left_counts[y_sorted[i]] += wi
             if x_sorted[i] + 1e-5 < x_sorted[i + 1]:
                 right_weight = known_weight - prefix_weight
-                if prefix_weight >= min_split - 1e-12 and right_weight >= min_split - 1e-12:
+                # WEKA: Utils.grOrEq(perBag, minSplit) for both bags.
+                if prefix_weight > min_split - 1e-6 and right_weight > min_split - 1e-6:
                     valid_positions[count] = i
                     left_weights[count] = prefix_weight
                     for c in range(n_classes):
@@ -473,7 +503,7 @@ if NUMBA_AVAILABLE:
             return (0, -1, 0.0, 0.0, 0.0, 0.0, 0.0, 0, known_weight)
 
         feat_entropy = _entropy_from_counts_numba(feat_counts, known_weight)
-        best_info_gain = -1.0
+        best_info_gain = 0.0
         best_pos = -1
         best_left = 0.0
         best_right = 0.0
@@ -500,20 +530,26 @@ if NUMBA_AVAILABLE:
             h_right = _entropy_from_counts_numba(right_counts, right_weight)
             child_entropy = ((left_weight / known_weight) * h_left) + ((right_weight / known_weight) * h_right)
             info_gain = (known_weight / total_weight) * (feat_entropy - child_entropy)
-            if info_gain > best_info_gain:
+            # WEKA: gains whose numerator is within Utils.SMALL of zero are
+            # zero, and a later threshold must beat the best by more than
+            # Utils.SMALL (Utils.gr), so near-ties keep the first threshold.
+            if abs(info_gain * known_weight) < 1e-6:
+                info_gain = 0.0
+            if info_gain > best_info_gain + 1e-6:
                 best_info_gain = info_gain
                 best_pos = valid_positions[cand_idx]
                 best_left = left_weight
                 best_right = right_weight
 
-        if best_info_gain <= 0.0:
+        if best_pos < 0:
             return (0, -1, 0.0, 0.0, 0.0, 0.0, 0.0, count, known_weight)
 
         if use_mdl_correction and count > 1:
             info_gain_adj = best_info_gain - (np.log2(float(count)) / total_weight)
         else:
             info_gain_adj = best_info_gain
-        if info_gain_adj <= 0.0:
+        # WEKA: Utils.smOrEq(infoGain, 0) means no split.
+        if info_gain_adj < 1e-6:
             return (0, -1, best_info_gain, info_gain_adj, 0.0, best_left, best_right, count, known_weight)
 
         missing_weight = total_weight - known_weight
@@ -527,13 +563,8 @@ if NUMBA_AVAILABLE:
             intrinsic -= p_right * np.log2(p_right)
         if p_missing > 0.0:
             intrinsic -= p_missing * np.log2(p_missing)
-        if intrinsic <= 0.0:
-            return (0, -1, best_info_gain, info_gain_adj, intrinsic, best_left, best_right, count, known_weight)
-
-        gain_ratio = info_gain_adj / intrinsic
-        if gain_ratio <= 0.0:
-            return (0, -1, best_info_gain, info_gain_adj, intrinsic, best_left, best_right, count, known_weight)
-
+        # A trivial split (zero split information) still counts towards the
+        # average gain, with a gain ratio of zero, as in WEKA.
         return (1, best_pos, best_info_gain, info_gain_adj, intrinsic, best_left, best_right, count, known_weight)
 
 
@@ -789,7 +820,6 @@ class C45TreeClassifier:
     - Entropy computation with bincount (about 2x faster).
     - Vectorized batch prediction (about 3-5x faster).
     - Optional cap on threshold candidates (up to 10x faster).
-    - Float32 conversion to reduce memory use.
     
     Parameters
     ----------
@@ -848,7 +878,9 @@ class C45TreeClassifier:
 
     use_laplace : bool, default=False
         If True, applies Laplace smoothing when estimating leaf class
-        probabilities, analogous to the WEKA J48 `-A` option.
+        probabilities, analogous to the WEKA J48 `-A` option. As in WEKA,
+        it only affects `predict_proba`: `predict` follows
+        `J48.classifyInstance`, which uses the unsmoothed distribution.
 
     nominal_features : list[int], optional
         Column indices that should be treated as nominal. For them, multi-way
@@ -989,6 +1021,11 @@ class C45TreeClassifier:
         self._feature_names_: Optional[list[str]] = None
         self._split_debug_trace_: list[dict[str, Any]] = []
         self._relocate_values_cache_: dict[int, np.ndarray] = {}
+        # Data whose values split points are relocated to, when it differs
+        # from the training data (reduced-error pruning: all folds).
+        self._relocate_X_: Optional[np.ndarray] = None
+        self._many_valued_features_: set[int] = set()
+        self._multi_val_: bool = False
 
     def _infer_nominal_features(self, X: np.ndarray) -> set[int]:
         nominal = set(self.nominal_features or [])
@@ -1333,6 +1370,7 @@ class C45TreeClassifier:
         self._rng_ = np.random.RandomState(self.random_state)
         self._split_debug_trace_ = []
         self._relocate_values_cache_ = {}
+        self._relocate_X_ = None
 
         n_samples, n_features = X.shape
         self.n_features_ = n_features
@@ -1343,6 +1381,15 @@ class C45TreeClassifier:
         else:
             self._feature_names_ = [f"f{i}" for i in range(n_features)]
         self._nominal_value_domains_ = self._resolve_nominal_value_domains(X)
+        # C45ModelSelection "multiVal": nominal attributes whose number of
+        # values is not below 30% of the training instances are left out of
+        # the gain average, unless every attribute is such an attribute.
+        self._many_valued_features_ = {
+            int(feat)
+            for feat in self._nominal_features_
+            if not (len(self._nominal_value_domains_.get(int(feat), [])) < 0.3 * n_samples - _WEKA_SMALL)
+        }
+        self._multi_val_ = n_features > 0 and len(self._many_valued_features_) == n_features
         self._log2_lut_ = np.zeros(n_samples + 1, dtype=np.float64)
         if n_samples > 0:
             self._log2_lut_[1:] = np.log2(np.arange(1, n_samples + 1, dtype=np.float64))
@@ -1380,9 +1427,11 @@ class C45TreeClassifier:
         else:
             indices = np.arange(n_samples, dtype=np.int32)
             self.root_ = self._build_tree(X, y_encoded, indices, weights, depth=0, path_conditions=[])
+            # As in WEKA's C45PruneableClassifierTree: collapse (unless -O),
+            # then prune (unless -U).
+            if self.collapse_tree and self.root_ is not None:
+                self.root_ = self._collapse_subtree(self.root_)
             if self.enable_pruning and self.root_ is not None:
-                if self.collapse_tree:
-                    self.root_ = self._collapse_subtree(self.root_)
                 self.root_ = self._prune_tree(self.root_)
 
         if self.cleanup:
@@ -1432,9 +1481,7 @@ class C45TreeClassifier:
         midpoint = float((left_value + right_value) * 0.5)
         threshold = self._relocate_split_point(feat, midpoint) if self.make_split_point_actual_value else midpoint
         missing_weight = max(total_weight - float(known_weight), 0.0)
-        best_local_gr = (float(info_gain_adj) / float(intrinsic)) if intrinsic > 0.0 else 0.0
-        if best_local_gr <= 0.0:
-            return None
+        best_local_gr = self._weka_numeric_gain_ratio(float(info_gain_adj), float(intrinsic), total_weight)
         return {
             "split_type": "numeric",
             "gain_ratio": float(best_local_gr),
@@ -1480,7 +1527,7 @@ class C45TreeClassifier:
             int(self.n_classes_),
             max_thresholds,
             bool(self.use_mdl_correction),
-            max(2.0, 2.0 * float(self.min_samples_leaf)) - 1e-12,
+            max(2.0, 2.0 * float(self.min_samples_leaf)) - 2.0 * _WEKA_SMALL,
         )
         candidates: dict[int, dict[str, Any]] = {}
         for j, feat in enumerate(numeric_feats):
@@ -1526,7 +1573,7 @@ class C45TreeClassifier:
             y_sorted = y_sub[sorted_local_idx]
             w_sorted = weights[sorted_local_idx].astype(np.float64, copy=False)
             known_weight = float(np.sum(w_sorted))
-        if known_weight < max(2.0, 2.0 * float(self.min_samples_leaf)) - 1e-12:
+        if known_weight < max(2.0, 2.0 * float(self.min_samples_leaf)) - 2.0 * _WEKA_SMALL:
             return None
 
         if use_numba:
@@ -1585,10 +1632,14 @@ class C45TreeClassifier:
                 0.1 * (known_weight / max(float(self.n_classes_ or 1), 1.0)),
             ),
         )
+        # WEKA: enough instances (a count, not a weight) with known values?
+        if x_sorted.size < 2.0 * min_split - _WEKA_SMALL:
+            return None
         weight_prefix = np.cumsum(w_sorted, dtype=np.float64)
         left_weight = weight_prefix[split_positions]
         right_weight = known_weight - left_weight
-        valid = (left_weight >= min_split - 1e-12) & (right_weight >= min_split - 1e-12)
+        # WEKA: Utils.grOrEq(perBag, minSplit) for both bags.
+        valid = (left_weight > min_split - _WEKA_SMALL) & (right_weight > min_split - _WEKA_SMALL)
         split_positions = split_positions[valid]
         if split_positions.size == 0:
             return None
@@ -1626,17 +1677,18 @@ class C45TreeClassifier:
             + (right_weight / known_weight) * h_right
         )
         info_gain = (known_weight / total_weight) * (feat_entropy - child_entropy)
-        best_local_idx = int(np.argmax(info_gain))
-        best_info_gain = float(info_gain[best_local_idx])
-        if best_info_gain <= 0.0:
+        best_local_idx = self._weka_first_best_gain(info_gain, known_weight)
+        if best_local_idx < 0:
             return None
+        best_info_gain = float(info_gain[best_local_idx])
 
         if self.use_mdl_correction and total_candidate_points > 1:
             mdl_penalty = np.log2(float(total_candidate_points)) / total_weight
             best_info_gain_adj = best_info_gain - mdl_penalty
         else:
             best_info_gain_adj = best_info_gain
-        if best_info_gain_adj <= 0.0:
+        # WEKA: Utils.smOrEq(infoGain, 0) means no split.
+        if best_info_gain_adj < _WEKA_SMALL:
             return None
 
         missing_weight = max(total_weight - known_weight, 0.0)
@@ -1652,9 +1704,7 @@ class C45TreeClassifier:
             intrinsic -= p_right * np.log2(p_right)
         if p_missing > 0.0:
             intrinsic -= p_missing * np.log2(p_missing)
-        best_local_gr = (best_info_gain_adj / intrinsic) if intrinsic > 0.0 else 0.0
-        if best_local_gr <= 0.0:
-            return None
+        best_local_gr = self._weka_numeric_gain_ratio(best_info_gain_adj, intrinsic, total_weight)
 
         pos = int(split_positions[best_local_idx])
         midpoint = float((x_sorted[pos] + x_sorted[pos + 1]) * 0.5)
@@ -1677,6 +1727,66 @@ class C45TreeClassifier:
             "sorted_local_idx": sorted_local_idx,
         }
 
+    @staticmethod
+    def _weka_first_best_gain(info_gain: np.ndarray, known_weight: float) -> int:
+        """
+        Index of the threshold WEKA's ``C45Split`` keeps: scanning in order
+        from a best gain of 0, a threshold replaces the best only if its gain
+        is larger by more than ``Utils.SMALL``; gains whose numerator is
+        within ``Utils.SMALL`` of zero count as zero. Returns -1 if none.
+        """
+        gains = np.where(np.abs(info_gain * known_weight) < _WEKA_SMALL, 0.0, info_gain)
+        if gains.size == 0:
+            return -1
+        # Everything before a replacement is at most best + SMALL, so every
+        # replacement is a strict running-maximum record: scan only those.
+        is_record = np.empty(gains.size, dtype=bool)
+        is_record[0] = True
+        is_record[1:] = gains[1:] > np.maximum.accumulate(gains)[:-1]
+        record_idx = np.flatnonzero(is_record)
+        best_idx = -1
+        best = 0.0
+        for idx, gain in zip(record_idx.tolist(), gains[record_idx].tolist()):
+            if gain > best + _WEKA_SMALL:
+                best_idx = idx
+                best = gain
+        return best_idx
+
+    @staticmethod
+    def _weka_numeric_gain_ratio(info_gain_adj: float, intrinsic: float, total_weight: float) -> float:
+        # GainRatioSplitCrit: a split information within Utils.SMALL of zero
+        # (in weight units) gives a gain ratio of 0.
+        if abs(intrinsic * total_weight) < _WEKA_SMALL:
+            return 0.0
+        return float(info_gain_adj / intrinsic)
+
+    @staticmethod
+    def _weka_gain_and_ratio(
+        known_weight: float,
+        total_weight: float,
+        parent_entropy: float,
+        child_entropy: float,
+        bag_weights: np.ndarray,
+    ) -> tuple[float, float, float]:
+        """
+        Information gain, split information and gain ratio as computed by
+        WEKA's InfoGainSplitCrit / GainRatioSplitCrit, including their
+        "equals zero" cut-offs (Utils.eq, in weight units).
+        """
+        info_gain = (known_weight / total_weight) * (parent_entropy - child_entropy)
+        # WEKA's numerator is (1 - unknownRate) * (oldEnt - newEnt) = gain * known.
+        if abs(info_gain * known_weight) < _WEKA_SMALL:
+            info_gain = 0.0
+        missing_weight = max(total_weight - known_weight, 0.0)
+        intrinsic = 0.0
+        for weight in list(np.asarray(bag_weights, dtype=np.float64)) + [missing_weight]:
+            if weight > 0.0:
+                prob = weight / total_weight
+                intrinsic -= float(prob * np.log2(prob))
+        # WEKA's split entropy is in weight units: total * intrinsic.
+        gain_ratio = 0.0 if abs(intrinsic * total_weight) < _WEKA_SMALL else info_gain / intrinsic
+        return float(info_gain), float(intrinsic), float(gain_ratio)
+
     def _find_best_nominal_split_candidate(
         self,
         x_feat: np.ndarray,
@@ -1694,7 +1804,7 @@ class C45TreeClassifier:
         y_valid = y_sub[valid_mask]
         w_valid = weights[valid_mask]
         known_weight = float(np.sum(w_valid))
-        if known_weight < max(2.0, 2.0 * float(self.min_samples_leaf)) - 1e-12:
+        if known_weight < max(2.0, 2.0 * float(self.min_samples_leaf)) - 2.0 * _WEKA_SMALL:
             return None
 
         observed_values = self._observed_nominal_values(x_valid)
@@ -1728,7 +1838,8 @@ class C45TreeClassifier:
             return None
 
         branch_weights_arr = np.asarray(branch_weights, dtype=np.float64)
-        if np.count_nonzero(branch_weights_arr >= min_leaf - 1e-12) < 2:
+        # Distribution.check(minNoObj): at least two branches with enough weight.
+        if np.count_nonzero(branch_weights_arr >= min_leaf - _WEKA_SMALL) < 2:
             return None
 
         feat_counts = np.bincount(
@@ -1739,19 +1850,12 @@ class C45TreeClassifier:
         for branch_weight, counts in zip(branch_weights_arr, branch_counts):
             child_entropy += (branch_weight / known_weight) * _entropy_from_weighted_counts(counts)
 
-        info_gain = (known_weight / total_weight) * (feat_entropy - child_entropy)
         missing_weight = max(total_weight - known_weight, 0.0)
-        intrinsic = 0.0
-        for prob in (branch_weights_arr / total_weight):
-            if prob > 0.0:
-                intrinsic -= float(prob * np.log2(prob))
-        if missing_weight > 0.0 and total_weight > 0.0:
-            p_missing = missing_weight / total_weight
-            intrinsic -= float(p_missing * np.log2(p_missing))
-
-        gain_ratio = (info_gain / intrinsic) if intrinsic > 0.0 else 0.0
-        if gain_ratio <= 0.0:
-            return None
+        info_gain, intrinsic, gain_ratio = self._weka_gain_and_ratio(
+            known_weight, total_weight, feat_entropy, child_entropy, branch_weights_arr
+        )
+        # Like WEKA's C45Split, a nominal split is a valid model even with no
+        # gain: it takes part in the gain average but cannot be selected.
 
         probs = branch_weights_arr / float(np.sum(branch_weights_arr))
         branch_prob_map = {
@@ -1790,7 +1894,7 @@ class C45TreeClassifier:
         y_valid = y_sub[valid_mask]
         w_valid = weights[valid_mask]
         known_weight = float(np.sum(w_valid))
-        if known_weight < max(2.0, 2.0 * float(self.min_samples_leaf)) - 1e-12:
+        if known_weight < max(2.0, 2.0 * float(self.min_samples_leaf)) - 2.0 * _WEKA_SMALL:
             return None
 
         observed_values = self._observed_nominal_values(x_valid)
@@ -1804,7 +1908,6 @@ class C45TreeClassifier:
             weights=w_valid,
             minlength=len(value_order) * self.n_classes_,
         ).reshape(len(value_order), self.n_classes_)
-        rows_per_value = np.bincount(positions, minlength=len(value_order))
 
         min_leaf = float(self.min_samples_leaf)
         feat_counts = np.bincount(
@@ -1813,39 +1916,35 @@ class C45TreeClassifier:
         feat_entropy = _entropy_from_weighted_counts(feat_counts)
         missing_weight = max(total_weight - known_weight, 0.0)
 
+        # BinC45Split.handleEnumeratedAttribute: visit values in domain order;
+        # value 0 is always taken when valid, later values only when their
+        # gain ratio is larger by more than Utils.SMALL.
         best_candidate: Optional[dict[str, Any]] = None
-        best_rank: Optional[tuple[float, float, float, int]] = None
+        best_gain_ratio = 0.0
 
         for value_idx, value in enumerate(value_order):
-            if rows_per_value[value_idx] == 0 or rows_per_value[value_idx] == positions.size:
-                continue
             pos_weight = float(weight_per_value[value_idx])
             neg_weight = known_weight - pos_weight
-            if pos_weight < min_leaf - 1e-12 or neg_weight < min_leaf - 1e-12:
+            if pos_weight < min_leaf - _WEKA_SMALL or neg_weight < min_leaf - _WEKA_SMALL:
                 continue
 
             pos_counts = counts_per_value[value_idx]
             neg_counts = feat_counts - pos_counts
-
             child_entropy = (
                 (pos_weight / known_weight) * _entropy_from_weighted_counts(pos_counts)
                 + (neg_weight / known_weight) * _entropy_from_weighted_counts(neg_counts)
             )
-            info_gain = (known_weight / total_weight) * (feat_entropy - child_entropy)
-
-            intrinsic = 0.0
-            for prob in (pos_weight / total_weight, neg_weight / total_weight):
-                if prob > 0.0:
-                    intrinsic -= float(prob * np.log2(prob))
-            if missing_weight > 0.0 and total_weight > 0.0:
-                p_missing = missing_weight / total_weight
-                intrinsic -= float(p_missing * np.log2(p_missing))
-
-            gain_ratio = (info_gain / intrinsic) if intrinsic > 0.0 else 0.0
-            if gain_ratio <= 0.0:
+            info_gain, intrinsic, gain_ratio = self._weka_gain_and_ratio(
+                known_weight,
+                total_weight,
+                feat_entropy,
+                child_entropy,
+                np.array([pos_weight, neg_weight]),
+            )
+            if not (value_idx == 0 or gain_ratio > best_gain_ratio + _WEKA_SMALL):
                 continue
-
-            candidate = {
+            best_gain_ratio = gain_ratio
+            best_candidate = {
                 "split_type": "nominal",
                 "gain_ratio": float(gain_ratio),
                 "info_gain": float(info_gain),
@@ -1863,15 +1962,6 @@ class C45TreeClassifier:
                 "missing_weight": missing_weight,
                 "binary_nominal_value": value,
             }
-            rank = (
-                float(candidate["gain_ratio"]),
-                float(candidate["info_gain_adj"]),
-                float(candidate["balance"]),
-                -int(value_idx),
-            )
-            if best_rank is None or rank > best_rank:
-                best_rank = rank
-                best_candidate = candidate
 
         return best_candidate
 
@@ -1955,8 +2045,13 @@ class C45TreeClassifier:
 
         # --- Stopping conditions ---
 
-        # 1. Pure node (single class).
-        if np.count_nonzero(counts > 1e-12) == 1:
+        # 1. Pure node, or not enough weight for two leaves
+        #    (C45ModelSelection: total < 2 * minNoObj, or total == max class).
+        if (
+            np.count_nonzero(counts > 1e-12) == 1
+            or total_weight < 2.0 * float(self.min_samples_leaf) - _WEKA_SMALL
+            or abs(total_weight - float(np.max(counts))) < _WEKA_SMALL
+        ):
             return self._make_leaf_node(
                 prediction=prediction,
                 prediction_idx=pred_class_idx,
@@ -2069,32 +2164,44 @@ class C45TreeClassifier:
                 train_weights=weights,
             )
 
-        # C4.5 prefilter: keep only candidates with gain >= average node gain.
+        # C45ModelSelection.selectModel: average the (MDL-adjusted) gain of all
+        # valid candidates, leaving out nominal attributes with very many
+        # values unless every attribute is like that ("multiVal").
         prefilter_mean_gain: Optional[float] = None
         prefilter_candidates = list(split_candidates)
         if self.use_gain_prefilter:
-            gains = [c["info_gain_adj"] for c in split_candidates]
-            if gains:
-                prefilter_mean_gain = float(np.mean(gains))
-                eligible = [
+            averaged = [
+                c for c in split_candidates
+                if c["split_type"] != "nominal" or self._multi_val_ or int(c["feature"]) not in self._many_valued_features_
+            ]
+            # No model in the average (validModels == 0): no split.
+            if not averaged:
+                split_candidates = []
+            else:
+                prefilter_mean_gain = float(np.mean([c["info_gain_adj"] for c in averaged]))
+                split_candidates = [
                     c
                     for c in split_candidates
                     if c["info_gain_adj"] >= (prefilter_mean_gain - self.gain_prefilter_slack)
                 ]
-                if eligible:
-                    split_candidates = eligible
 
-        # Final selection closest to WEKA:
-        # iterate in feature order and replace only when the gain ratio
-        # improves strictly. In ties, keep the first candidate.
-        best = split_candidates[0]
-        best_gain_ratio = float(best["gain_ratio"])
-        for candidate in split_candidates[1:]:
+        # Pick the first candidate, in attribute order, whose gain ratio beats
+        # the best so far (starting at 0) by more than Utils.SMALL.
+        best = None
+        best_gain_ratio = 0.0
+        for candidate in split_candidates:
             candidate_gr = float(candidate["gain_ratio"])
-            if candidate_gr > best_gain_ratio + 1e-12:
+            if candidate_gr > best_gain_ratio + _WEKA_SMALL:
                 best = candidate
                 best_gain_ratio = candidate_gr
-        best_gain_ratio = float(best["gain_ratio"])
+        if best is None:
+            return self._make_leaf_node(
+                prediction=prediction,
+                prediction_idx=pred_class_idx,
+                class_counts=counts,
+                train_indices=indices,
+                train_weights=weights,
+            )
         best_feature = int(best["feature"])
         best_threshold = None if best.get("threshold") is None else float(best["threshold"])
 
@@ -2225,7 +2332,7 @@ class C45TreeClassifier:
                 split_known_weight=float(best["known_weight"]),
                 split_missing_weight=float(best["missing_weight"]),
             )
-            return self._maybe_collapse_unpruned_split(node)
+            return node
 
         known_local_sorted = np.asarray(best.pop("sorted_local_idx"), dtype=np.int32)
         sorted_weights = weights[known_local_sorted]
@@ -2322,7 +2429,7 @@ class C45TreeClassifier:
             split_known_weight=float(best["known_weight"]),
             split_missing_weight=float(best["missing_weight"]),
         )
-        return self._maybe_collapse_unpruned_split(node)
+        return node
 
     @staticmethod
     def _initial_sorted_orders(feats: list[int], column_of) -> _SortedOrders:
@@ -2396,10 +2503,11 @@ class C45TreeClassifier:
         cached = self._relocate_values_cache_.get(int(feature_index))
         if cached is not None:
             return cached
-        if self._train_X_ is None:
+        source_X = self._relocate_X_ if self._relocate_X_ is not None else self._train_X_
+        if source_X is None:
             return np.zeros(0, dtype=np.float64)
 
-        feat_values = self._coerce_numeric_column(self._train_X_[:, feature_index])
+        feat_values = self._coerce_numeric_column(source_X[:, feature_index])
         finite_values = np.sort(feat_values[np.isfinite(feat_values)], kind="mergesort")
         self._relocate_values_cache_[int(feature_index)] = finite_values
         return finite_values
@@ -2431,33 +2539,22 @@ class C45TreeClassifier:
             return self._leaf_training_errors(node)
         return float(sum(self._subtree_training_errors(child) for _, child in child_items))
 
-    def _maybe_collapse_unpruned_split(self, node: _Node) -> _Node:
+    def _collapse_subtree(self, node: _Node) -> _Node:
         """
-        In pure unpruned mode, discard splits that do not reduce training error
-        relative to the node's leaf prediction.
-
-        This captures branches with positive gain but no real predictive
-        improvement, which are precisely the divergences observed against WEKA
-        under `-U`. Like WEKA's `collapse()`, this only applies when
-        `collapse_tree` is enabled (i.e. J48 is run without `-O`).
+        WEKA's ``ClassifierTree.collapse()``: top-down, replace a split by a
+        leaf when the subtree does not reduce training errors by more than
+        1e-3; otherwise collapse the children.
         """
-        if node.is_leaf or self.enable_pruning or self.reduced_error_pruning:
+        if node.is_leaf:
             return node
-        if not self.collapse_tree:
-            return node
-
         child_items = self._iter_child_items(node)
         if not child_items:
             return node
 
         leaf_err = self._leaf_training_errors(node)
         subtree_err = self._subtree_training_errors(node)
-        if leaf_err <= subtree_err + 1e-12:
+        if subtree_err >= leaf_err - 1e-3:
             self._clear_split(node)
-        return node
-
-    def _collapse_subtree(self, node: _Node) -> _Node:
-        if node.is_leaf:
             return node
 
         if node.split_type == "nominal" and node.nominal_children:
@@ -2470,15 +2567,6 @@ class C45TreeClassifier:
                 node.left = self._collapse_subtree(node.left)
             if node.right is not None:
                 node.right = self._collapse_subtree(node.right)
-
-        child_items = self._iter_child_items(node)
-        if not child_items:
-            return node
-
-        leaf_err = self._leaf_training_errors(node)
-        subtree_err = self._subtree_training_errors(node)
-        if leaf_err <= subtree_err + 1e-12:
-            self._clear_split(node)
         return node
 
     def _add_errs(self, n: float, errors: float) -> float:
@@ -2581,13 +2669,22 @@ class C45TreeClassifier:
                 known_idx = indices[valid_mask]
                 known_w = weights[valid_mask]
                 known_values = np.asarray(x_feat[valid_mask])
-                matched_mask = np.zeros(known_idx.size, dtype=bool)
-                for edge, _ in child_items:
-                    branch_mask = self._nominal_match_mask(known_values, edge)
+                # One pass over the values instead of one mask per branch.
+                explicit_edges = [edge for edge, _ in child_items if edge != _NOMINAL_OTHER_BRANCH]
+                positions = self._nominal_value_positions(known_values, explicit_edges)
+                for position, edge in enumerate(explicit_edges):
+                    branch_mask = positions == position
                     if np.any(branch_mask):
                         idx_parts[edge].append(known_idx[branch_mask])
                         weight_parts[edge].append(known_w[branch_mask])
-                        matched_mask |= branch_mask
+                matched_mask = positions >= 0
+
+                # Binary (-B) splits: every other known value belongs to the
+                # "rest" branch, exactly as in tree building and prediction.
+                if _NOMINAL_OTHER_BRANCH in idx_parts and np.any(~matched_mask):
+                    idx_parts[_NOMINAL_OTHER_BRANCH].append(known_idx[~matched_mask])
+                    weight_parts[_NOMINAL_OTHER_BRANCH].append(known_w[~matched_mask])
+                    matched_mask[:] = True
 
                 unseen_mask = ~matched_mask
                 if np.any(unseen_mask):
@@ -2916,7 +3013,8 @@ class C45TreeClassifier:
             indices,
             weights,
         )
-        if leaf_error <= subtree_error + 1e-12:
+        # WEKA's PruneableClassifierTree: Utils.smOrEq(errorsForLeaf, errorsForTree).
+        if leaf_error < subtree_error + _WEKA_SMALL:
             self._clear_split(node)
         return node
 
@@ -2934,6 +3032,10 @@ class C45TreeClassifier:
         if grow_idx.size == 0:
             raise ValueError("reduced_error_pruning requires at least one grow fold")
 
+        # WEKA's C45ModelSelection relocates split points to values of the
+        # full dataset (m_allData), including the pruning fold.
+        self._relocate_X_ = X
+        self._relocate_values_cache_ = {}
         X_grow = X[grow_idx]
         y_grow = y_encoded[grow_idx]
         w_grow = weights[grow_idx].astype(np.float64, copy=False)
@@ -2957,124 +3059,130 @@ class C45TreeClassifier:
             w_prune,
         )
 
-    def _subtree_estimated_errors_with_incoming(
+    def _route_with_reset_distribution(
         self,
         node: _Node,
-        incoming_indices: np.ndarray,
-        incoming_weights: np.ndarray,
+        indices: np.ndarray,
+        weights: np.ndarray,
+        keep: bool,
+    ) -> dict[Any, tuple[np.ndarray, np.ndarray]]:
+        """
+        Split ``indices`` at ``node`` with missing-value proportions
+        recomputed from the known values of ``indices`` (WEKA's
+        ``resetDistribution``). With ``keep=False`` the node's stored
+        proportions are left unchanged (WEKA's ``getEstimatedErrorsForBranch``);
+        with ``keep=True`` they are replaced (WEKA's ``newDistribution``).
+        """
+        if not self.enable_fractional_missing or indices.size == 0:
+            return self._route_indices_with_weights(node, indices, weights)
+        x_feat = self._train_X_[indices, node.feature_index]
+        if node.split_type == "nominal":
+            missing = self._feature_missing_mask(x_feat)
+        else:
+            missing = ~np.isfinite(self._coerce_numeric_column(x_feat))
+        known = ~missing
+        any_missing = bool(np.any(missing))
+        if not keep and not any_missing:
+            return self._route_indices_with_weights(node, indices, weights)
+        routed = self._route_indices_with_weights(node, indices[known], weights[known])
+        branch_w = {edge: float(np.sum(w)) for edge, (_, w) in routed.items()}
+        total = float(sum(branch_w.values()))
+        if total <= 0.0:
+            # No known weight to take proportions from: keep the stored ones.
+            return self._route_indices_with_weights(node, indices, weights)
+
+        probs = {edge: w / total for edge, w in branch_w.items()}
+        if keep:
+            # The new proportions are also the ones used for prediction.
+            if node.split_type == "nominal":
+                node.nominal_child_probs = probs
+            else:
+                node.left_prob = probs.get("left", 0.0)
+        if not any_missing:
+            return routed
+        miss_idx = indices[missing]
+        miss_w = weights[missing]
+        result = {}
+        for edge, (known_idx, known_w) in routed.items():
+            routed_w = miss_w * probs[edge]
+            keep_rows = routed_w > 1e-12
+            result[edge] = self._concat_weighted_parts(
+                [known_idx, miss_idx[keep_rows]], [known_w, routed_w[keep_rows]]
+            )
+        return result
+
+    def _branch_estimated_errors(
+        self,
+        node: _Node,
+        indices: np.ndarray,
+        weights: np.ndarray,
     ) -> float:
         """
-        Estimate subtree error when it receives additional weighted instances,
-        using explicit instance routing instead of projection from aggregated
-        counts.
+        Estimated errors of the subtree at ``node`` if it received the
+        weighted instances ``indices`` instead of its own training data
+        (WEKA's ``getEstimatedErrorsForBranch``). Leaves predict the majority
+        class of the instances that reach them.
         """
-        incoming_indices = _as_int32_array(incoming_indices)
-        incoming_weights = _as_float64_array(incoming_weights)
-
-        if incoming_indices.size == 0:
-            return self._subtree_estimated_errors(node)
-
+        indices = _as_int32_array(indices)
+        weights = _as_float64_array(weights)
         child_items = self._iter_child_items(node)
         if node.is_leaf or not child_items:
-            extra_counts = np.bincount(
-                self._train_y_encoded_[incoming_indices],
-                weights=incoming_weights,
+            counts = np.bincount(
+                self._train_y_encoded_[indices],
+                weights=weights,
                 minlength=self.n_classes_,
             ).astype(np.float64, copy=False)
-            base_counts = (
-                node.class_counts.astype(np.float64, copy=False)
-                if node.class_counts is not None
-                else np.zeros(self.n_classes_, dtype=np.float64)
+            return self._node_estimated_errors_from_counts(counts, int(np.argmax(counts)))
+
+        routed = self._route_with_reset_distribution(node, indices, weights, keep=False)
+        return float(
+            sum(
+                self._branch_estimated_errors(child, *routed[edge])
+                for edge, child in child_items
             )
-            total_counts = base_counts + extra_counts
-            pred_idx = int(np.argmax(total_counts)) if np.any(total_counts > 0.0) else node.prediction_idx
-            return self._node_estimated_errors_from_counts(total_counts, pred_idx)
+        )
 
-        routed = self._route_indices_with_weights(node, incoming_indices, incoming_weights)
-        total_error = 0.0
-        for edge, child in child_items:
-            child_idx, child_w = routed[edge]
-            total_error += self._subtree_estimated_errors_with_incoming(child, child_idx, child_w)
-        return total_error
-
-    def _augment_subtree_with_incoming(
+    def _redistribute_subtree(
         self,
         node: _Node,
-        incoming_indices: np.ndarray,
-        incoming_weights: np.ndarray,
-    ) -> _Node:
+        indices: np.ndarray,
+        weights: np.ndarray,
+        parent_counts: Optional[np.ndarray] = None,
+    ) -> None:
         """
-        Update a promoted subtree by adding weighted sibling instances so that
-        the structure resulting from subtree raising has class distributions
-        consistent with training.
+        Replace the training data of the subtree at ``node`` by ``indices``,
+        recomputing class counts, predictions and missing-value proportions
+        top-down (WEKA's ``newDistribution``, used after subtree raising).
         """
-        incoming_indices = _as_int32_array(incoming_indices)
-        incoming_weights = _as_float64_array(incoming_weights)
-
-        if incoming_indices.size == 0:
-            return node
-
-        if node.class_counts is None:
-            node.class_counts = np.zeros(self.n_classes_, dtype=np.float64)
-        else:
-            node.class_counts = _as_float64_array(node.class_counts, copy=True)
-
-        extra_counts = np.bincount(
-            self._train_y_encoded_[incoming_indices],
-            weights=incoming_weights,
+        indices = _as_int32_array(indices)
+        weights = _as_float64_array(weights)
+        node.train_indices = indices.copy()
+        node.train_weights = weights.copy()
+        node.class_counts = np.bincount(
+            self._train_y_encoded_[indices],
+            weights=weights,
             minlength=self.n_classes_,
         ).astype(np.float64, copy=False)
-        node.class_counts = node.class_counts + extra_counts
-
-        if node.train_indices is None:
-            node.train_indices = incoming_indices.copy()
-            node.train_weights = incoming_weights.copy()
-        else:
-            node.train_indices = np.concatenate((node.train_indices, incoming_indices)).astype(np.int32, copy=False)
-            node.train_weights = np.concatenate((node.train_weights, incoming_weights)).astype(np.float64, copy=False)
-
         if np.any(node.class_counts > 0.0):
             node.prediction_idx = int(np.argmax(node.class_counts))
+            node.prediction = self.classes_[node.prediction_idx]
+            # A leaf that receives data is no longer empty (WEKA only ever
+            # clears m_isEmpty here).
+            node.probability_counts = None
+        elif node.probability_counts is not None and parent_counts is not None and np.any(parent_counts > 0.0):
+            # An empty leaf predicts with its parent's distribution, which
+            # has just been recomputed.
+            node.probability_counts = parent_counts.copy()
+            node.prediction_idx = int(np.argmax(parent_counts))
             node.prediction = self.classes_[node.prediction_idx]
         self._invalidate_cached_metrics(node)
 
         child_items = self._iter_child_items(node)
         if node.is_leaf or not child_items:
-            return node
-
-        routed = self._route_indices_with_weights(node, incoming_indices, incoming_weights)
-        if node.split_type == "nominal":
-            for edge, child in child_items:
-                child_idx, child_w = routed[edge]
-                if child_idx.size > 0:
-                    node.nominal_children[edge] = self._augment_subtree_with_incoming(child, child_idx, child_w)
-        else:
-            left_idx, left_w = routed["left"]
-            right_idx, right_w = routed["right"]
-            if left_idx.size > 0 and node.left is not None:
-                node.left = self._augment_subtree_with_incoming(node.left, left_idx, left_w)
-            if right_idx.size > 0 and node.right is not None:
-                node.right = self._augment_subtree_with_incoming(node.right, right_idx, right_w)
-        return node
-
-    def _estimate_raise_cost(
-        self,
-        promoted: _Node,
-        incoming_indices: np.ndarray,
-        incoming_weights: np.ndarray,
-    ) -> float:
-        """
-        Cost of subtree raising by explicitly evaluating how sibling instances
-        are redistributed through the promoted subtree.
-        """
-        if incoming_indices.size == 0:
-            return self._subtree_estimated_errors(promoted)
-
-        return self._subtree_estimated_errors_with_incoming(
-            promoted,
-            incoming_indices,
-            incoming_weights,
-        )
+            return
+        routed = self._route_with_reset_distribution(node, indices, weights, keep=True)
+        for edge, child in child_items:
+            self._redistribute_subtree(child, *routed[edge], parent_counts=node.class_counts)
 
     def _subtree_estimated_errors(self, node: _Node) -> float:
         if node._cached_subtree_estimated_errors is not None:
@@ -3093,16 +3201,16 @@ class C45TreeClassifier:
         return est
 
     def _largest_branch(self, node: _Node) -> Optional[tuple[Any, _Node]]:
-        child_items = self._iter_child_items(node)
-        if not child_items:
-            return None
-        return max(
-            child_items,
-            key=lambda item: (
-                self._node_n_samples(item[1]),
-                -1 if item[0] == "left" else 0 if item[0] == "right" else 1,
-            ),
-        )
+        # WEKA's Distribution.maxBag(): the last bag with
+        # Utils.grOrEq(perBag[i], max), so ties go to the later branch.
+        largest = None
+        max_weight = 0.0
+        for edge, child in self._iter_child_items(node):
+            weight = self._node_n_samples(child)
+            if max_weight - weight < _WEKA_SMALL:
+                largest = (edge, child)
+                max_weight = weight
+        return largest
 
     def _clear_split(self, node: _Node) -> None:
         node.is_leaf = True
@@ -3146,45 +3254,28 @@ class C45TreeClassifier:
 
         child_items = self._iter_child_items(node)
         branch_est = float("inf")
-        largest_branch_payload: Optional[tuple[_Node, np.ndarray, np.ndarray]] = None
-        if self.enable_subtree_raising and child_items:
+        largest_branch_payload: Optional[_Node] = None
+        if self.enable_subtree_raising and child_items and node.train_indices is not None:
             largest = self._largest_branch(node)
             if largest is not None:
-                largest_edge, largest_child = largest
-                sib_idx_parts = []
-                sib_w_parts = []
-                for other_edge, other_child in child_items:
-                    if other_edge == largest_edge:
-                        continue
-                    if other_child.train_indices is None or other_child.train_weights is None:
-                        continue
-                    sib_idx_parts.append(other_child.train_indices)
-                    sib_w_parts.append(other_child.train_weights)
-                incoming_idx, incoming_w = self._concat_weighted_parts(sib_idx_parts, sib_w_parts)
-                branch_est = self._estimate_raise_cost(largest_child, incoming_idx, incoming_w)
-                largest_branch_payload = (largest_child, incoming_idx, incoming_w)
+                # As in WEKA, the largest branch is evaluated on all of this
+                # node's training data, with missing-value proportions
+                # recomputed from that data at every node of the branch.
+                largest_child = largest[1]
+                branch_est = self._branch_estimated_errors(
+                    largest_child, node.train_indices, node.train_weights
+                )
+                largest_branch_payload = largest_child
 
-        if leaf_est <= subtree_est + 0.1 and leaf_est <= branch_est + 0.1:
+        # WEKA: Utils.smOrEq(a, b + 0.1), i.e. a < b + 0.1 + SMALL.
+        if leaf_est < subtree_est + 0.1 + _WEKA_SMALL and leaf_est < branch_est + 0.1 + _WEKA_SMALL:
             self._clear_split(node)
             return node
 
-        if largest_branch_payload is not None and branch_est <= subtree_est + 0.1:
-            promoted, incoming_idx, incoming_w = largest_branch_payload
-            promoted_copy = copy.deepcopy(promoted)
-            if incoming_idx.size > 0:
-                promoted_copy = self._augment_subtree_with_incoming(
-                    promoted_copy,
-                    incoming_idx,
-                    incoming_w,
-                )
+        if largest_branch_payload is not None and branch_est < subtree_est + 0.1 + _WEKA_SMALL:
+            promoted_copy = copy.deepcopy(largest_branch_payload)
             # The promoted subtree now represents the full parent node.
-            promoted_copy.class_counts = node.class_counts.astype(np.float64, copy=True)
-            promoted_copy.prediction = node.prediction
-            promoted_copy.prediction_idx = node.prediction_idx
-            if node.train_indices is not None and node.train_weights is not None:
-                promoted_copy.train_indices = node.train_indices.copy()
-                promoted_copy.train_weights = node.train_weights.copy()
-            self._invalidate_cached_metrics(promoted_copy)
+            self._redistribute_subtree(promoted_copy, node.train_indices, node.train_weights)
             # Re-run pruning on the promoted subtree using its final counts.
             # Without this second pass, subtree raising can preserve splits
             # that no longer survive the pessimistic pruning test after the
@@ -3208,6 +3299,7 @@ class C45TreeClassifier:
         self._train_y_encoded_ = None
         self._log2_lut_ = None
         self._relocate_values_cache_ = {}
+        self._relocate_X_ = None
 
     def _predict_batch(self, X: np.ndarray, node: _Node, indices: np.ndarray) -> np.ndarray:
         """
@@ -3293,6 +3385,11 @@ class C45TreeClassifier:
         """
         Predict classes for samples in X.
 
+        As WEKA's `J48.classifyInstance`: the class with the highest
+        unsmoothed probability, where a later class only wins if its
+        probability is larger by more than 1e-6 (ties go to the first
+        class in `classes_`).
+
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
@@ -3315,10 +3412,14 @@ class C45TreeClassifier:
 
         if self.enable_fractional_missing and (self._matrix_has_missing(X) or bool(self._nominal_features_)):
             # When missing values are present and fractional mode is active,
-            # use a probability mixture to avoid hard routing of NaNs.
-            proba = self.predict_proba(X)
-            pred_idx = np.argmax(proba, axis=1)
-            return self.classes_[pred_idx]
+            # use a probability mixture to avoid hard routing of NaNs. As in
+            # WEKA's J48.classifyInstance, the class is chosen from the
+            # distribution without Laplace smoothing (-A only affects
+            # probabilities).
+            proba = np.zeros((n_samples, self.n_classes_), dtype=np.float64)
+            indices = np.arange(n_samples, dtype=np.int32)
+            self._predict_proba_batch(X, self.root_, indices, proba, None, False)
+            return self.classes_[_weka_max_index(proba)]
 
         # Vectorized prediction.
         indices = np.arange(n_samples, dtype=np.int32)
@@ -3334,6 +3435,7 @@ class C45TreeClassifier:
         indices: np.ndarray, 
         proba: np.ndarray,
         weights: Optional[np.ndarray] = None,
+        laplace: bool = False,
     ) -> None:
         """
         Recursive probability prediction (in place).
@@ -3365,7 +3467,7 @@ class C45TreeClassifier:
             if leaf_counts is not None:
                 counts_sum = float(leaf_counts.sum())
                 if counts_sum > 0:
-                    if self.use_laplace:
+                    if laplace:
                         dist = (
                             (leaf_counts + 1.0)
                             / (counts_sum + float(self.n_classes_))
@@ -3376,7 +3478,7 @@ class C45TreeClassifier:
                     prob_counts = node.probability_counts.astype(np.float64, copy=False)
                     prob_sum = float(prob_counts.sum())
                     if prob_sum > 0.0:
-                        if self.use_laplace:
+                        if laplace:
                             dist = (
                                 (prob_counts + 1.0)
                                 / (prob_sum + float(self.n_classes_))
@@ -3428,6 +3530,7 @@ class C45TreeClassifier:
                                 known_idx[branch_mask],
                                 proba,
                                 known_w[branch_mask],
+                                laplace,
                             )
 
                 unseen_mask = ~handled_valid
@@ -3439,7 +3542,7 @@ class C45TreeClassifier:
                             prob = float((node.nominal_child_probs or {}).get(edge, 0.0))
                             routed_w = fallback_w * prob
                             if np.any(routed_w > 0.0):
-                                self._predict_proba_batch(X, child, fallback_idx, proba, routed_w)
+                                self._predict_proba_batch(X, child, fallback_idx, proba, routed_w, laplace)
                     else:
                         default_child = None
                         if node.nominal_children is not None:
@@ -3447,7 +3550,7 @@ class C45TreeClassifier:
                         if default_child is None and node.nominal_children:
                             default_child = next(iter(node.nominal_children.values()))
                         if default_child is not None:
-                            self._predict_proba_batch(X, default_child, fallback_idx, proba, fallback_w)
+                            self._predict_proba_batch(X, default_child, fallback_idx, proba, fallback_w, laplace)
 
             if np.any(missing_mask):
                 miss_idx = indices[missing_mask]
@@ -3457,7 +3560,7 @@ class C45TreeClassifier:
                         prob = float((node.nominal_child_probs or {}).get(edge, 0.0))
                         routed_w = miss_w * prob
                         if np.any(routed_w > 0.0):
-                            self._predict_proba_batch(X, child, miss_idx, proba, routed_w)
+                            self._predict_proba_batch(X, child, miss_idx, proba, routed_w, laplace)
                 else:
                     default_child = None
                     if node.nominal_children is not None:
@@ -3465,7 +3568,7 @@ class C45TreeClassifier:
                     if default_child is None and node.nominal_children:
                         default_child = next(iter(node.nominal_children.values()))
                     if default_child is not None:
-                        self._predict_proba_batch(X, default_child, miss_idx, proba, miss_w)
+                        self._predict_proba_batch(X, default_child, miss_idx, proba, miss_w, laplace)
             return
 
         numeric_feat = self._coerce_numeric_column(x_feat)
@@ -3481,9 +3584,9 @@ class C45TreeClassifier:
             right_indices = known_idx[~known_left_mask]
             right_w = known_w[~known_left_mask]
             if left_indices.size > 0 and node.left is not None:
-                self._predict_proba_batch(X, node.left, left_indices, proba, left_w)
+                self._predict_proba_batch(X, node.left, left_indices, proba, left_w, laplace)
             if right_indices.size > 0 and node.right is not None:
-                self._predict_proba_batch(X, node.right, right_indices, proba, right_w)
+                self._predict_proba_batch(X, node.right, right_indices, proba, right_w, laplace)
 
         if np.any(missing_mask):
             miss_idx = indices[missing_mask]
@@ -3492,16 +3595,16 @@ class C45TreeClassifier:
                 left_w = miss_w * float(node.left_prob)
                 right_w = miss_w * float(1.0 - node.left_prob)
                 if miss_idx.size > 0 and np.any(left_w > 0.0) and node.left is not None:
-                    self._predict_proba_batch(X, node.left, miss_idx, proba, left_w)
+                    self._predict_proba_batch(X, node.left, miss_idx, proba, left_w, laplace)
                 if miss_idx.size > 0 and np.any(right_w > 0.0) and node.right is not None:
-                    self._predict_proba_batch(X, node.right, miss_idx, proba, right_w)
+                    self._predict_proba_batch(X, node.right, miss_idx, proba, right_w, laplace)
             else:
                 if bool(node.missing_go_to_left):
                     if node.left is not None:
-                        self._predict_proba_batch(X, node.left, miss_idx, proba, miss_w)
+                        self._predict_proba_batch(X, node.left, miss_idx, proba, miss_w, laplace)
                 else:
                     if node.right is not None:
-                        self._predict_proba_batch(X, node.right, miss_idx, proba, miss_w)
+                        self._predict_proba_batch(X, node.right, miss_idx, proba, miss_w, laplace)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         """
@@ -3536,7 +3639,7 @@ class C45TreeClassifier:
         
         # Vectorized prediction.
         indices = np.arange(n_samples, dtype=np.int32)
-        self._predict_proba_batch(X, self.root_, indices, proba, None)
+        self._predict_proba_batch(X, self.root_, indices, proba, None, self.use_laplace)
         
         # Check rows with zero sum (should not happen, but keep a safe fallback).
         row_sums = proba.sum(axis=1)

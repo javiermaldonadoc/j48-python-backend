@@ -4,9 +4,16 @@ Skipped unless `J48_WEKA_CLASSPATH` points at a WEKA 3.8 classpath, e.g.::
 
     J48_WEKA_CLASSPATH=weka-stable-3.8.6.jar:bounce-0.18.jar pytest tests/test_weka_parity.py
 
-Each case fits WEKA and `J48Classifier` on the same random ARFF split with
-equivalent options and requires the same tree size, number of leaves and
-test-set predictions.
+Each case fits WEKA, `J48Classifier` and `J48FastClassifier` on the same
+random ARFF split with equivalent options and requires:
+
+* the same tree size and number of leaves;
+* the same class probabilities on the test set as WEKA's
+  `distributionForInstance` (up to rounding);
+* the same predicted classes as WEKA's `J48.classifyInstance`, which picks
+  the first class whose probability exceeds the previous best by more than
+  `Utils.SMALL` (1e-6) and ignores Laplace smoothing (`-A` only smooths the
+  probabilities).
 """
 
 from __future__ import annotations
@@ -22,7 +29,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from j48 import J48Classifier
+from j48 import J48Classifier, J48FastClassifier
+from weka_datasets import FAMILIES
 
 WEKA_CLASSPATH = os.environ.get("J48_WEKA_CLASSPATH")
 
@@ -47,48 +55,15 @@ MODES = {
     "-R": (["-R", "-N", "3", "-Q", "1"], {"reduced_error_pruning": True, "num_folds": 3, "random_state": 1}),
 }
 
-# Known divergences from WEKA 3.8.6, all on datasets with a nominal attribute.
-# Keyed by (mode, seed, nominal, missing). Strict xfail: fixing one of them
-# makes the test fail until it is removed from this list.
-KNOWN_DIVERGENCES = {
-    ("default", 1, True, False),
-    ("-O", 1, True, False),
-    ("-A", 1, True, False),
-    ("-B", 3, True, False),
-    ("-B", 4, True, False),
-    ("-R", 0, True, False),
-    ("-R", 1, True, True),
-    ("-R", 2, True, True),
-    ("-R", 4, True, False),
-}
-
 SEEDS = range(6)
-NOMINAL_DOMAIN = ["a", "b", "c", "d"]
+WEKA_SMALL = 1e-6
 
 
-def _dataset(seed: int, nominal: bool, missing: bool):
-    rng = np.random.default_rng(seed)
-    n = int(rng.integers(80, 400))
-    k = int(rng.integers(2, 4))
-    numeric = np.round(rng.normal(size=(n, 3)), 3)
-    cat = rng.choice(NOMINAL_DOMAIN, size=n)
-    signal = numeric[:, 0] + 0.8 * numeric[:, 1] * (cat == "a") + rng.normal(scale=0.8, size=n)
-    y = np.digitize(signal, np.quantile(signal, np.linspace(0, 1, k + 1)[1:-1]))
-
-    columns = [numeric[:, 0], numeric[:, 1], numeric[:, 2]] + ([cat] if nominal else [])
-    X = np.column_stack(columns).astype(object)
-    for j in range(3):
-        X[:, j] = [float(v) for v in X[:, j]]
-    if missing:
-        X[rng.random(X.shape) < 0.08] = None
-    return X, y, k
-
-
-def _write_arff(path: Path, X, y, n_classes: int, nominal: bool) -> None:
+def _write_arff(path: Path, X, y, n_classes: int, domains: dict) -> None:
     lines = ["@relation parity"]
     lines += [f"@attribute n{j} numeric" for j in range(3)]
-    if nominal:
-        lines.append("@attribute c {" + ",".join(NOMINAL_DOMAIN) + "}")
+    for j in sorted(domains):
+        lines.append(f"@attribute c{j} {{" + ",".join(domains[j]) + "}")
     lines.append("@attribute class {" + ",".join(str(i) for i in range(n_classes)) + "}")
     lines.append("@data")
     for row, label in zip(X, y):
@@ -103,42 +78,66 @@ def _run_weka(train: Path, test: Path, flags: list[str]):
     leaves = int(re.search(r"Number of Leaves\s*:\s*(\d+)", model).group(1))
     size = int(re.search(r"Size of the tree\s*:\s*(\d+)", model).group(1))
     output = subprocess.run(
-        base + ["-classifications", "weka.classifiers.evaluation.output.prediction.CSV"],
+        base + ["-classifications", "weka.classifiers.evaluation.output.prediction.CSV -distribution -decimals 17"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
     block = output[output.index("inst#"):].strip().split("\n\n")[0]
-    predictions = np.array([int(row[2].split(":")[1]) for row in list(csv.reader(io.StringIO(block)))[1:]])
-    return leaves, size, predictions
+    rows = list(csv.reader(io.StringIO(block)))[1:]
+    # Columns: inst#, actual, predicted, error, then one probability per
+    # class (the predicted one prefixed with "*").
+    proba = np.array([[float(cell.lstrip("*")) for cell in row[4:]] for row in rows])
+    return leaves, size, proba
+
+
+def _classify_instance(proba: np.ndarray) -> np.ndarray:
+    """WEKA's ClassifierTree.classifyInstance class choice (Utils.gr)."""
+    best = np.full(proba.shape[0], -1.0)
+    idx = np.zeros(proba.shape[0], dtype=int)
+    for j in range(proba.shape[1]):
+        take = proba[:, j] > best + WEKA_SMALL
+        idx[take] = j
+        best[take] = proba[take, j]
+    return idx
 
 
 def _cases():
     for mode in MODES:
-        for seed in SEEDS:
-            for nominal in (False, True):
-                for missing in (False, True):
-                    marks = []
-                    if (mode, seed, nominal, missing) in KNOWN_DIVERGENCES:
-                        marks.append(pytest.mark.xfail(strict=True, reason="known divergence from WEKA"))
-                    case_id = f"{mode}|seed={seed}|{'nominal' if nominal else 'numeric'}|{'missing' if missing else 'complete'}"
-                    yield pytest.param(mode, seed, nominal, missing, id=case_id, marks=marks)
+        for family in FAMILIES:
+            for seed in SEEDS:
+                for nominal in (False, True):
+                    for missing in (False, True):
+                        case_id = (
+                            f"{mode}|{family}{seed}|{'nominal' if nominal else 'numeric'}"
+                            f"|{'missing' if missing else 'complete'}"
+                        )
+                        yield pytest.param(mode, family, seed, nominal, missing, id=case_id)
 
 
-@pytest.mark.parametrize("mode,seed,nominal,missing", list(_cases()))
-def test_matches_weka(tmp_path, mode, seed, nominal, missing):
+@pytest.mark.parametrize("mode,family,seed,nominal,missing", list(_cases()))
+def test_matches_weka(tmp_path, mode, family, seed, nominal, missing):
     flags, params = MODES[mode]
-    X, y, n_classes = _dataset(seed, nominal, missing)
+    X, y, n_classes, domains = FAMILIES[family](seed, nominal, missing)
     n_train = len(y) * 2 // 3
     train, test = tmp_path / "train.arff", tmp_path / "test.arff"
-    _write_arff(train, X[:n_train], y[:n_train], n_classes, nominal)
-    _write_arff(test, X[n_train:], y[n_train:], n_classes, nominal)
+    _write_arff(train, X[:n_train], y[:n_train], n_classes, domains)
+    _write_arff(test, X[n_train:], y[n_train:], n_classes, domains)
 
-    weka_leaves, weka_size, weka_pred = _run_weka(train, test, flags)
+    weka_leaves, weka_size, weka_proba = _run_weka(train, test, flags)
 
-    extra = {"nominal_features": [3], "nominal_value_domains": {3: NOMINAL_DOMAIN}} if nominal else {}
-    clf = J48Classifier(**params, **extra).fit(X[:n_train], y[:n_train])
-    stats = clf.get_tree_stats()
+    if "-A" in flags:
+        # -A does not change J48.classifyInstance: its classes come from the
+        # unsmoothed distribution, i.e. from the same model without -A.
+        unsmoothed = [flag for flag in flags if flag != "-A"]
+        weka_pred = _classify_instance(_run_weka(train, test, unsmoothed)[2])
+    else:
+        weka_pred = _classify_instance(weka_proba)
 
-    assert (stats["leaf_count"], stats["node_count"]) == (weka_leaves, weka_size)
-    np.testing.assert_array_equal(clf.predict(X[n_train:]), weka_pred)
+    extra = {"nominal_features": sorted(domains), "nominal_value_domains": domains} if domains else {}
+    for estimator in (J48Classifier, J48FastClassifier):
+        clf = estimator(**params, **extra).fit(X[:n_train], y[:n_train])
+        stats = clf.get_tree_stats()
+        assert (stats["leaf_count"], stats["node_count"]) == (weka_leaves, weka_size), estimator.__name__
+        np.testing.assert_allclose(clf.predict_proba(X[n_train:]), weka_proba, rtol=0, atol=1e-9)
+        np.testing.assert_array_equal(clf.predict(X[n_train:]), weka_pred)

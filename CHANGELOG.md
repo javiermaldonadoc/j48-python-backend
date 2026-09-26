@@ -4,6 +4,97 @@ All notable changes to this project are documented in this file.
 The project follows [Semantic Versioning](https://semver.org/); while the
 version is `0.x`, a minor bump may change public behavior.
 
+## [0.5.0] - 2026-09-26
+
+WEKA parity release. The comparison rules, tolerances and pruning steps of
+J48 now follow WEKA 3.8.6's source (`C45ModelSelection`, `C45Split`,
+`BinC45Split`, `C45PruneableClassifierTree`, `PruneableClassifierTree`,
+`ClassifierTree`). Measured against `weka.jar` on 4,320 generated cases (9
+option sets x 2 dataset families x 60 seeds x nominal/missing variants,
+392,616 test predictions), both estimators now build trees of the same size
+in every case (0.4.0: 1383/1440 on the first 20 seeds), predict the same
+class as `J48.classifyInstance` for every row, and return the probabilities
+of `distributionForInstance` to within 3e-15.
+
+**Tree compatibility with 0.4.0.** Trees change where 0.4.0 differed from
+WEKA. On the first 20 seeds (1,440 fits), 90 trees have a different split
+structure, mostly with `-B` (36) and `-R` (35), and 611 of 145,620 test
+predictions change (0.42%), including those from the `-A` and tie changes
+below.
+
+### Changed (predictions)
+
+- **`predict()` follows `J48.classifyInstance`.** The predicted class is the
+  first class whose probability exceeds the best so far by more than 1e-6
+  (`Utils.SMALL`), so exact and near-exact ties go to the first class in
+  `classes_` regardless of floating-point rounding. Before, the strict line
+  took `argmax` (rounding decided ties) and the fast line took the first
+  class within 1e-7, so the two lines could disagree on tied rows.
+- **`use_laplace=True` (`-A`) only affects `predict_proba()`**, as in WEKA,
+  whose `-A` smooths `distributionForInstance` but not `classifyInstance`.
+  Before, it could also change `predict()` on rows with missing values or
+  nominal features.
+
+### Fixed (trees)
+
+- **Subtree raising** now works as `C45PruneableClassifierTree.prune()`:
+  the largest branch is evaluated on all of the node's training data, with
+  missing-value proportions recomputed from that data at every node
+  (`getEstimatedErrorsForBranch`/`resetDistribution`); after raising, the
+  raised subtree's class counts, missing-value proportions (also used for
+  prediction) and empty-leaf distributions are recomputed from the parent's
+  data (`newDistribution`). Before, only the siblings' instances were added,
+  routed with the proportions from tree building.
+- **Largest branch ties** go to the later branch (WEKA's `maxBag` uses
+  `grOrEq`), also for nominal splits.
+- **Collapsing** (`collapse_tree=True`) is WEKA's top-down `collapse()` with
+  its 1e-3 tolerance, applied after building in pruned and unpruned modes.
+- **`-B` subtree raising** routed instances of the "other" branch
+  incorrectly when estimating and applying a raise.
+- **Reduced-error pruning (`-R`)** relocates numeric split points to values
+  of the full dataset, including the pruning fold, as WEKA's
+  `C45ModelSelection` does with `m_allData`. Before, only the growing folds
+  were used, which moved thresholds and changed test predictions.
+- **Split selection** uses WEKA's comparisons:
+  - the best attribute must beat the others by more than 1e-6
+    (`Utils.gr`, starting from 0), and a model with zero gain ratio still
+    counts towards the average gain;
+  - nominal attributes with at least 0.3 x N values are excluded from the
+    average gain unless all attributes are like that (WEKA's `multiVal`),
+    and a node with no model left in the average is a leaf;
+  - gains and split information within 1e-6 of zero (in instance-weight
+    units) are zero;
+  - numeric thresholds: a later threshold must beat the best by more than
+    1e-6, so near-ties keep the first threshold; a split needs at least
+    `2 * minSplit` instances (a count) with known values, each branch at
+    least `minSplit` weight within 1e-6, and an MDL-corrected gain of at
+    least 1e-6;
+  - binary nominal splits (`-B`) scan values in domain order with the same
+    rule;
+  - a node is a leaf when its weight is below `2 * min_num_obj` or all its
+    weight is in one class, within 1e-6.
+- Pessimistic pruning and reduced-error pruning compare errors with
+  `Utils.smOrEq` (1e-6).
+
+### Performance
+
+Subtree raising now evaluates the whole branch on the parent's data, like
+WEKA. Nominal routing during pruning resolves each value once instead of
+once per branch, which more than compensates on nominal data. Measured back
+to back on the 0.4.0 benchmark workloads: 60k x 41 IDS-like, fast line
+5.5 s -> 5.0 s, strict line 24 s -> 27 s; 100k x 20 numeric with 5% missing,
+2.3/2.6 s -> 2.7/3.0 s (fast/strict). Timings vary by about 10-20% between
+runs on this machine.
+
+### Tests
+
+- `tests/test_weka_parity.py` has no expected failures any more. It now
+  checks both estimators on two dataset families (432 cases), comparing
+  tree size, leaves, probabilities (to 1e-9) and `classifyInstance`
+  classes.
+- `tests/test_weka_semantics.py`: WEKA-free regression tests for threshold
+  ties, class ties across both lines, `-A` and the empty gain average.
+
 ## [0.4.0] - 2026-09-26
 
 Performance release, plus fixes found while reviewing it.
@@ -206,6 +297,7 @@ below only affect the cases described.
 
 - Paper-facing artifact snapshot.
 
+[0.5.0]: https://github.com/javiermaldonadoc/j48-python-backend/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/javiermaldonadoc/j48-python-backend/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/javiermaldonadoc/j48-python-backend/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/javiermaldonadoc/j48-python-backend/compare/v0.1.1...v0.2.0

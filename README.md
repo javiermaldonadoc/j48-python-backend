@@ -117,7 +117,7 @@ The suite covers the regressions fixed in each release, scikit-learn API conform
 
 ### WEKA parity tests
 
-`tests/test_weka_parity.py` fits WEKA's J48 and `J48Classifier` on the same random ARFF splits for 9 option sets (`-U`, `-O`, `-S`, `-B`, `-A`, `-R`, `-C/-M`, ...) and compares tree size, number of leaves and test predictions. It needs Java and a WEKA 3.8 classpath:
+`tests/test_weka_parity.py` fits WEKA's J48, `J48Classifier` and `J48FastClassifier` on the same random ARFF splits (432 cases: 9 option sets such as `-U`, `-O`, `-S`, `-B`, `-A`, `-R`, `-C/-M`, two dataset families including an IDS-like one with many ties and a 10-valued nominal attribute, with and without missing values). It requires the same tree size and number of leaves, the same test-set probabilities as WEKA's `distributionForInstance` (to 1e-9) and the same classes as `J48.classifyInstance`. It needs Java and a WEKA 3.8 classpath:
 
 ```bash
 base=https://repo1.maven.org/maven2/nz/ac/waikato/cms/weka
@@ -126,7 +126,7 @@ curl -sSfLO $base/thirdparty/bounce/0.18/bounce-0.18.jar
 J48_WEKA_CLASSPATH=weka-stable-3.8.6.jar:bounce-0.18.jar python -m pytest -m weka
 ```
 
-Known divergences are listed in the test file as expected failures. CI runs all of the above on every pull request.
+Since 0.5.0 there are no known divergences: on 4,320 generated cases both estimators match WEKA 3.8.6 in every tree and predicted class, and probabilities agree to within 3e-15. CI runs all of the above on every pull request.
 
 ## Choosing an estimator
 
@@ -173,7 +173,7 @@ The public artifact is intended to be consumed through tagged releases.
 
 For manuscript alignment, cite the exact tag and commit used by the paper instead of the moving default branch.
 
-Releases after the paper snapshot (`0.2.0` and later) contain correctness fixes, stricter scikit-learn input validation and WEKA parity tests; on ordinary inputs they build the same trees as `0.1.x`. See [CHANGELOG.md](CHANGELOG.md) for the exact scope of each change.
+Releases after the paper snapshot (`0.2.0` and later) contain correctness fixes, stricter scikit-learn input validation and WEKA parity tests. Up to `0.4.0` they build the same trees as `0.1.x` on ordinary inputs; `0.5.0` aligns the remaining comparison rules with WEKA, which changes some trees (mostly with `-B` and `-R`) and some predictions. See [CHANGELOG.md](CHANGELOG.md) for the exact scope of each change.
 
 ## Status
 
