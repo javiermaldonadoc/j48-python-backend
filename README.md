@@ -135,6 +135,14 @@ Known divergences are listed in the test file as expected failures. CI runs all 
 
 See [CHANGELOG.md](CHANGELOG.md) for benchmark details.
 
+## Releasing
+
+Maintainers can find the versioning, validation, artifact-building and tagging
+checklist in [RELEASING.md](RELEASING.md). Release tags use `v` followed by the
+PEP 440 project version and must point to a commit that has passed the full CI
+matrix. A valid tag build creates a draft GitHub Release and attaches its
+wheel, source archive and checksums for final review.
+
 ## Input conventions
 
 The estimators follow scikit-learn conventions (2D `X`, 1D `y`, explicit errors for sparse input, continuous or missing targets, all-zero weights, and DataFrames whose column names or order differ from those seen in `fit`), with two J48-specific allowances: missing feature values (`NaN`, `None`, `"?"`, `pd.NA`; infinity is treated as missing) and non-numeric nominal columns are accepted directly.
