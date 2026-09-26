@@ -31,8 +31,9 @@ predictions and probabilities.
 - `fit()` now rejects, with explicit errors: `y=None`; continuous
   (regression) targets; `y` containing NaN or infinity (drop those rows
   first; WEKA also discards instances with a missing class); sparse `X`
-  (`TypeError`); empty `X` (0 samples or 0 features); complex data; and
-  `sample_weight` that is all zeros.
+  (`TypeError`); empty `X` (0 samples or 0 features); complex data,
+  including complex scalars inside `object` arrays or DataFrame columns;
+  and `sample_weight` that is all zeros.
 - A column-vector `y` is raveled with a `DataConversionWarning`.
 - Missing values (NaN, None, `"?"`, and infinity, which is treated as
   missing) and non-numeric nominal columns are still accepted, as before.

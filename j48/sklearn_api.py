@@ -19,14 +19,53 @@ def _input_shape(X: Any) -> tuple[int, ...]:
     return tuple(int(v) for v in shape)
 
 
+try:
+    from pandas.api.types import infer_dtype as _infer_dtype
+except Exception:  # pragma: no cover - pandas is optional
+    _infer_dtype = None
+
+# `pandas.api.types.infer_dtype` results that cannot contain complex scalars.
+_NON_COMPLEX_INFERRED = {
+    "string", "bytes", "floating", "integer", "mixed-integer-float", "boolean",
+    "empty", "decimal", "categorical", "datetime", "datetime64", "date", "time",
+    "timedelta", "timedelta64", "period", "interval",
+}
+
+
+def _object_column_has_complex(values: np.ndarray) -> bool:
+    if _infer_dtype is not None:
+        inferred = _infer_dtype(values, skipna=True)
+        if inferred == "complex":
+            return True
+        if inferred in _NON_COMPLEX_INFERRED:
+            return False
+    # Mixed or unknown content (or no pandas): inspect the values.
+    return any(isinstance(v, (complex, np.complexfloating)) for v in values.tolist())
+
+
 def _is_complex_input(X: Any) -> bool:
+    """True for complex dtypes and for object data holding complex scalars."""
     dtypes = getattr(X, "dtypes", None)
     if dtypes is not None:
-        return any(getattr(dtype, "kind", "") == "c" for dtype in list(dtypes))
+        for j, dtype in enumerate(list(dtypes)):
+            kind = getattr(dtype, "kind", "")
+            if kind == "c":
+                return True
+            if kind == "O" and _object_column_has_complex(np.asarray(X.iloc[:, j], dtype=object)):
+                return True
+        return False
     dtype = getattr(X, "dtype", None)
+    arr = None
     if dtype is None:
-        dtype = np.asarray(X).dtype
-    return np.dtype(dtype).kind == "c"
+        arr = np.asarray(X)
+        dtype = arr.dtype
+    kind = np.dtype(dtype).kind
+    if kind == "c":
+        return True
+    if kind == "O":
+        arr = np.asarray(X) if arr is None else arr
+        return any(_object_column_has_complex(arr[:, j]) for j in range(arr.shape[1]))
+    return False
 
 
 class J48Classifier(ClassifierMixin, BaseEstimator):

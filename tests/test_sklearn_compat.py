@@ -101,6 +101,18 @@ def test_invalid_targets_are_rejected(cls, data, bad_y, message):
 
 
 @pytest.mark.parametrize("cls", ESTIMATORS)
+@pytest.mark.parametrize("as_frame", [False, True])
+def test_complex_scalars_in_object_data_are_rejected(cls, as_frame):
+    X = np.array([[1 + 2j, 0.5], [2.0, 1.5], [3.0, 0.1], [4.0, 0.3]] * 5, dtype=object)
+    y = np.array([0, 1, 0, 1] * 5)
+    if as_frame:
+        pd = pytest.importorskip("pandas")
+        X = pd.DataFrame(X)
+    with pytest.raises(ValueError, match="Complex data not supported"):
+        cls().fit(X, y)
+
+
+@pytest.mark.parametrize("cls", ESTIMATORS)
 def test_column_vector_target_warns_and_fits(cls, data):
     X, y = data
     with pytest.warns(DataConversionWarning):
