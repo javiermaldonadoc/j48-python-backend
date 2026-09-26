@@ -66,6 +66,9 @@ def _is_missing_scalar(value: Any) -> bool:
     value = _to_python_scalar(value)
     if value is None:
         return True
+    # pandas missing markers (pd.NA, pd.NaT), detected without importing pandas.
+    if type(value).__name__ in ("NAType", "NaTType"):
+        return True
     if isinstance(value, str):
         return value.strip() in {"", "?"}
     if isinstance(value, (float, np.floating)):
@@ -237,20 +240,21 @@ def _binary_entropy_from_positive_weight(positive_weight: np.ndarray, total_weig
     """
     positive_weight = np.asarray(positive_weight, dtype=np.float64)
     total_weight = np.asarray(total_weight, dtype=np.float64)
-    entropies = np.zeros_like(total_weight, dtype=np.float64)
     valid = total_weight > 0.0
-    if not np.any(valid):
+    if not np.all(valid):
+        entropies = np.zeros_like(total_weight, dtype=np.float64)
+        if np.any(valid):
+            entropies[valid] = _binary_entropy_from_positive_weight(
+                positive_weight[valid], total_weight[valid]
+            )
         return entropies
 
-    pos = np.clip(positive_weight[valid], 0.0, total_weight[valid])
-    neg = total_weight[valid] - pos
-    c_log_c = np.zeros_like(pos, dtype=np.float64)
-    pos_mask = pos > 0.0
-    neg_mask = neg > 0.0
-    c_log_c[pos_mask] += pos[pos_mask] * np.log2(pos[pos_mask])
-    c_log_c[neg_mask] += neg[neg_mask] * np.log2(neg[neg_mask])
-    entropies[valid] = np.log2(total_weight[valid]) - (c_log_c / total_weight[valid])
-    return entropies
+    # Mask-free form: zero weights contribute 0 * log2(1) = 0 exactly, so the
+    # result is bitwise identical to accumulating only the positive terms.
+    pos = np.clip(positive_weight, 0.0, total_weight)
+    neg = total_weight - pos
+    c_log_c = pos * np.log2(np.where(pos > 0.0, pos, 1.0)) + neg * np.log2(np.where(neg > 0.0, neg, 1.0))
+    return np.log2(total_weight) - (c_log_c / total_weight)
 
 
 if NUMBA_AVAILABLE:
@@ -273,53 +277,24 @@ if NUMBA_AVAILABLE:
 
 
     @njit(cache=True)
-    def _extract_sorted_numeric_feature_numba(
+    def _gather_sorted_numba(
         x_feat: np.ndarray,
         y_sub: np.ndarray,
         weights: np.ndarray,
-    ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        n = x_feat.shape[0]
-        valid_count = 0
+        order: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+        n = order.shape[0]
+        x_sorted = np.empty(n, dtype=np.float64)
+        y_sorted = np.empty(n, dtype=np.int64)
+        w_sorted = np.empty(n, dtype=np.float64)
+        known_weight = 0.0
         for i in range(n):
-            if np.isfinite(x_feat[i]):
-                valid_count += 1
-
-        if valid_count == 0:
-            return (
-                0,
-                np.empty(0, dtype=np.float64),
-                np.empty(0, dtype=np.int64),
-                np.empty(0, dtype=np.float64),
-                np.empty(0, dtype=np.int32),
-            )
-
-        valid_x = np.empty(valid_count, dtype=np.float64)
-        valid_y = np.empty(valid_count, dtype=np.int64)
-        valid_w = np.empty(valid_count, dtype=np.float64)
-        valid_idx = np.empty(valid_count, dtype=np.int32)
-        out = 0
-        for i in range(n):
-            value = x_feat[i]
-            if np.isfinite(value):
-                valid_x[out] = value
-                valid_y[out] = y_sub[i]
-                valid_w[out] = weights[i]
-                valid_idx[out] = i
-                out += 1
-
-        order = np.argsort(valid_x)
-        x_sorted = np.empty(valid_count, dtype=np.float64)
-        y_sorted = np.empty(valid_count, dtype=np.int64)
-        w_sorted = np.empty(valid_count, dtype=np.float64)
-        sorted_local_idx = np.empty(valid_count, dtype=np.int32)
-        for i in range(valid_count):
             src = order[i]
-            x_sorted[i] = valid_x[src]
-            y_sorted[i] = valid_y[src]
-            w_sorted[i] = valid_w[src]
-            sorted_local_idx[i] = valid_idx[src]
-
-        return (1, x_sorted, y_sorted, w_sorted, sorted_local_idx)
+            x_sorted[i] = x_feat[src]
+            y_sorted[i] = y_sub[src]
+            w_sorted[i] = weights[src]
+            known_weight += weights[src]
+        return x_sorted, y_sorted, w_sorted, known_weight
 
 
     @njit(cache=True)
@@ -431,71 +406,6 @@ if NUMBA_AVAILABLE:
             return (0, -1, best_info_gain, info_gain_adj, intrinsic, best_left, best_right, count, known_weight)
 
         return (1, best_pos, best_info_gain, info_gain_adj, intrinsic, best_left, best_right, count, known_weight)
-
-
-    @njit(cache=True)
-    def _find_best_binary_numeric_split_unsorted_numba(
-        x_feat: np.ndarray,
-        y_sub: np.ndarray,
-        weights: np.ndarray,
-        total_weight: float,
-        min_leaf: float,
-        n_classes: int,
-        max_thresholds: int,
-        use_mdl_correction: bool,
-    ) -> tuple[int, int, float, float, float, float, float, int, float, np.ndarray]:
-        ok, x_sorted, y_sorted, w_sorted, sorted_local_idx = _extract_sorted_numeric_feature_numba(
-            x_feat, y_sub, weights
-        )
-        if ok == 0:
-            return (
-                0,
-                -1,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0,
-                0.0,
-                np.empty(0, dtype=np.int32),
-            )
-
-        ok2, best_pos, best_info_gain, info_gain_adj, intrinsic, best_left, best_right, count, known_weight = _find_best_binary_numeric_split_numba(
-            x_sorted,
-            y_sorted,
-            w_sorted,
-            total_weight,
-            min_leaf,
-            n_classes,
-            max_thresholds,
-            use_mdl_correction,
-        )
-        if ok2 == 0:
-            return (
-                0,
-                best_pos,
-                best_info_gain,
-                info_gain_adj,
-                intrinsic,
-                best_left,
-                best_right,
-                count,
-                known_weight,
-                np.empty(0, dtype=np.int32),
-            )
-        return (
-            ok2,
-            best_pos,
-            best_info_gain,
-            info_gain_adj,
-            intrinsic,
-            best_left,
-            best_right,
-            count,
-            known_weight,
-            sorted_local_idx,
-        )
 
 
     @njit(cache=True)
@@ -628,78 +538,119 @@ if NUMBA_AVAILABLE:
 
 
     @njit(cache=True)
-    def _find_best_multiclass_numeric_split_unsorted_numba(
-        x_feat: np.ndarray,
+    def _subset_orders_numba(
+        orders_flat: np.ndarray,
+        offsets: np.ndarray,
+        positions: np.ndarray,
+        n_positions: int,
+    ):
+        """Numba version of `C45TreeClassifier._subset_sorted_orders`."""
+        remap = np.full(n_positions, -1, dtype=np.int32)
+        for i in range(positions.shape[0]):
+            remap[positions[i]] = i
+        k = offsets.shape[0] - 1
+        out = np.empty(orders_flat.shape[0], dtype=np.int32)
+        new_offsets = np.zeros(k + 1, dtype=np.int64)
+        count = 0
+        for j in range(k):
+            for i in range(offsets[j], offsets[j + 1]):
+                mapped = remap[orders_flat[i]]
+                if mapped >= 0:
+                    out[count] = mapped
+                    count += 1
+            new_offsets[j + 1] = count
+        # Copy so the child does not keep the parent-sized buffer alive.
+        return out[:count].copy(), new_offsets
+
+
+    @njit(cache=True)
+    def _best_numeric_splits_batch_numba(
+        X_num: np.ndarray,
         y_sub: np.ndarray,
         weights: np.ndarray,
+        orders_flat: np.ndarray,
+        offsets: np.ndarray,
         total_weight: float,
         min_leaf: float,
         n_classes: int,
         max_thresholds: int,
         use_mdl_correction: bool,
-    ) -> tuple[int, int, float, float, float, float, float, int, float, np.ndarray]:
-        ok, x_sorted, y_sorted, w_sorted, sorted_local_idx = _extract_sorted_numeric_feature_numba(
-            x_feat, y_sub, weights
-        )
-        if ok == 0:
-            return (
-                0,
-                -1,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0,
-                0.0,
-                np.empty(0, dtype=np.int32),
-            )
+        min_known_weight: float,
+    ):
+        """Run the per-feature split search for all numeric columns of a node."""
+        k = offsets.shape[0] - 1
+        ok = np.zeros(k, dtype=np.int64)
+        best_pos = np.full(k, -1, dtype=np.int64)
+        info_gain = np.zeros(k, dtype=np.float64)
+        info_gain_adj = np.zeros(k, dtype=np.float64)
+        intrinsic = np.zeros(k, dtype=np.float64)
+        left_w = np.zeros(k, dtype=np.float64)
+        right_w = np.zeros(k, dtype=np.float64)
+        counts = np.zeros(k, dtype=np.int64)
+        known_w = np.zeros(k, dtype=np.float64)
+        left_v = np.zeros(k, dtype=np.float64)
+        right_v = np.zeros(k, dtype=np.float64)
+        for j in range(k):
+            start = offsets[j]
+            n = offsets[j + 1] - start
+            x_sorted = np.empty(n, dtype=np.float64)
+            y_sorted = np.empty(n, dtype=np.int64)
+            w_sorted = np.empty(n, dtype=np.float64)
+            known = 0.0
+            for i in range(n):
+                src = orders_flat[start + i]
+                x_sorted[i] = X_num[src, j]
+                y_sorted[i] = y_sub[src]
+                w_sorted[i] = weights[src]
+                known += weights[src]
+            if known < min_known_weight:
+                continue
+            if n_classes == 2:
+                result = _find_best_binary_numeric_split_numba(
+                    x_sorted, y_sorted, w_sorted, total_weight, min_leaf,
+                    n_classes, max_thresholds, use_mdl_correction,
+                )
+            else:
+                result = _find_best_multiclass_numeric_split_numba(
+                    x_sorted, y_sorted, w_sorted, total_weight, min_leaf,
+                    n_classes, max_thresholds, use_mdl_correction,
+                )
+            if result[0] == 0:
+                continue
+            p = result[1]
+            ok[j] = 1
+            best_pos[j] = p
+            info_gain[j] = result[2]
+            info_gain_adj[j] = result[3]
+            intrinsic[j] = result[4]
+            left_w[j] = result[5]
+            right_w[j] = result[6]
+            counts[j] = result[7]
+            known_w[j] = result[8]
+            left_v[j] = x_sorted[p]
+            right_v[j] = x_sorted[p + 1]
+        return ok, best_pos, info_gain, info_gain_adj, intrinsic, left_w, right_w, counts, known_w, left_v, right_v
 
-        ok2, best_pos, best_info_gain, info_gain_adj, intrinsic, best_left, best_right, count, known_weight = _find_best_multiclass_numeric_split_numba(
-            x_sorted,
-            y_sorted,
-            w_sorted,
-            total_weight,
-            min_leaf,
-            n_classes,
-            max_thresholds,
-            use_mdl_correction,
-        )
-        if ok2 == 0:
-            return (
-                0,
-                best_pos,
-                best_info_gain,
-                info_gain_adj,
-                intrinsic,
-                best_left,
-                best_right,
-                count,
-                known_weight,
-                np.empty(0, dtype=np.int32),
-            )
-        return (
-            ok2,
-            best_pos,
-            best_info_gain,
-            info_gain_adj,
-            intrinsic,
-            best_left,
-            best_right,
-            count,
-            known_weight,
-            sorted_local_idx,
-        )
+
 else:
+    def _best_numeric_splits_batch_numba(*args):
+        raise RuntimeError("numba is not available")
+
+
+    def _subset_orders_numba(*args):
+        raise RuntimeError("numba is not available")
+
+
     def _binary_entropy_scalar_numba(positive_weight: float, total_weight: float) -> float:
         raise RuntimeError("numba is not available")
 
 
-    def _extract_sorted_numeric_feature_numba(
+    def _gather_sorted_numba(
         x_feat: np.ndarray,
         y_sub: np.ndarray,
         weights: np.ndarray,
-    ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        order: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
         raise RuntimeError("numba is not available")
 
 
@@ -729,45 +680,56 @@ else:
         raise RuntimeError("numba is not available")
 
 
-    def _find_best_binary_numeric_split_unsorted_numba(
-        x_feat: np.ndarray,
-        y_sub: np.ndarray,
-        weights: np.ndarray,
-        total_weight: float,
-        min_leaf: float,
-        n_classes: int,
-        max_thresholds: int,
-        use_mdl_correction: bool,
-    ) -> tuple[int, int, float, float, float, float, float, int, float, np.ndarray]:
-        raise RuntimeError("numba is not available")
-
-
-    def _find_best_multiclass_numeric_split_unsorted_numba(
-        x_feat: np.ndarray,
-        y_sub: np.ndarray,
-        weights: np.ndarray,
-        total_weight: float,
-        min_leaf: float,
-        n_classes: int,
-        max_thresholds: int,
-        use_mdl_correction: bool,
-    ) -> tuple[int, int, float, float, float, float, float, int, float, np.ndarray]:
-        raise RuntimeError("numba is not available")
-
-
 def warmup_numba_numeric_kernel() -> None:
     if not NUMBA_AVAILABLE:
         return
     x = np.array([0.0, 1.0], dtype=np.float64)
     y = np.array([0, 1], dtype=np.int64)
     w = np.array([1.0, 1.0], dtype=np.float64)
-    _find_best_binary_numeric_split_unsorted_numba(x, y, w, 2.0, 1.0, 2, -1, False)
+    _gather_sorted_numba(x, y, w, np.array([1, 0], dtype=np.int32))
     _find_best_binary_numeric_split_numba(x, y, w, 2.0, 1.0, 2, -1, False)
     x3 = np.array([0.0, 1.0, 2.0], dtype=np.float64)
     y3 = np.array([0, 1, 2], dtype=np.int64)
     w3 = np.array([1.0, 1.0, 1.0], dtype=np.float64)
-    _find_best_multiclass_numeric_split_unsorted_numba(x3, y3, w3, 3.0, 1.0, 3, -1, False)
     _find_best_multiclass_numeric_split_numba(x3, y3, w3, 3.0, 1.0, 3, -1, False)
+    X2 = np.column_stack([x3, x3])
+    order = np.array([0, 1, 2, 0, 1, 2], dtype=np.int32)
+    offsets = np.array([0, 3, 6], dtype=np.int64)
+    _subset_orders_numba(order, offsets, np.array([2, 0], dtype=np.int64), 3)
+    for n_classes in (2, 3):
+        _best_numeric_splits_batch_numba(
+            X2, np.array([0, 1, 1], dtype=np.int64), w3, order, offsets,
+            3.0, 1.0, n_classes, -1, False, 2.0,
+        )
+
+
+class _SortedOrders:
+    """
+    Per-feature sorted orders of a node, stored in one flat buffer.
+
+    `flat[offsets[j]:offsets[j + 1]]` holds the node-local positions of the
+    known values of feature `feats[j]`, in ascending value order. A single
+    buffer lets children be derived without concatenating per-feature arrays.
+    """
+
+    __slots__ = ("feats", "flat", "offsets", "_slot")
+
+    def __init__(self, feats: list[int], flat: np.ndarray, offsets: np.ndarray) -> None:
+        self.feats = feats
+        self.flat = flat
+        self.offsets = offsets
+        self._slot = {feat: j for j, feat in enumerate(feats)}
+
+    def __getitem__(self, feat: int) -> np.ndarray:
+        j = self._slot[feat]
+        return self.flat[self.offsets[j]:self.offsets[j + 1]]
+
+    @classmethod
+    def from_arrays(cls, feats: list[int], arrays: list[np.ndarray]) -> "_SortedOrders":
+        offsets = np.zeros(len(arrays) + 1, dtype=np.int64)
+        offsets[1:] = np.cumsum([a.size for a in arrays])
+        flat = np.concatenate(arrays).astype(np.int32, copy=False) if arrays else np.zeros(0, dtype=np.int32)
+        return cls(feats, flat, offsets)
 
 
 @dataclass
@@ -1147,6 +1109,59 @@ class C45TreeClassifier:
     def _normalize_nominal_value(self, value: Any) -> Any:
         return _to_python_scalar(value)
 
+    def _observed_nominal_values(self, values: np.ndarray) -> list[Any]:
+        """Distinct nominal values in order of first appearance."""
+        arr = np.asarray(values)
+        if arr.dtype.kind in "biuf":
+            uniques, first_index = np.unique(arr, return_index=True)
+            ordered = uniques[np.argsort(first_index, kind="stable")]
+            return [self._normalize_nominal_value(v) for v in ordered.tolist()]
+        return list(dict.fromkeys(self._normalize_nominal_value(v) for v in arr.tolist()))
+
+    def _nominal_value_positions(self, values: np.ndarray, value_order: list[Any]) -> np.ndarray:
+        """
+        Index of each value in `value_order` (-1 when it matches none).
+
+        Equality follows `_nominal_match_mask`. Both backends use this single
+        mapping and then the same `bincount`-based sums, so the strict line
+        (object values) and the fast line (integer codes) perform identical
+        floating-point operations and break exact ties the same way.
+        """
+        arr = np.asarray(values)
+        n = arr.shape[0]
+        if not value_order or n == 0:
+            return np.full(n, -1, dtype=np.int64)
+        domain = np.asarray(value_order)
+        if (
+            arr.dtype.kind in "biuf"
+            and domain.ndim == 1
+            and domain.dtype.kind in "iuf"
+            and np.all(np.isfinite(domain.astype(np.float64)))
+        ):
+            domain_f = domain.astype(np.float64)
+            sorter = np.argsort(domain_f, kind="stable")
+            sorted_domain = domain_f[sorter]
+            if sorted_domain.size < 2 or not np.any(sorted_domain[1:] == sorted_domain[:-1]):
+                arr_f = arr.astype(np.float64, copy=False)
+                slots = np.clip(np.searchsorted(sorted_domain, arr_f), 0, sorted_domain.size - 1)
+                return np.where(sorted_domain[slots] == arr_f, sorter[slots], -1).astype(np.int64)
+        try:
+            slot_of: dict[Any, int] = {}
+            for i, value in enumerate(value_order):
+                slot_of.setdefault(value, i)
+            return np.fromiter(
+                (slot_of.get(self._normalize_nominal_value(v), -1) for v in arr.tolist()),
+                dtype=np.int64,
+                count=n,
+            )
+        except TypeError:
+            # Unhashable values: fall back to one equality mask per value.
+            positions = np.full(n, -1, dtype=np.int64)
+            for i, value in enumerate(value_order):
+                mask = self._nominal_match_mask(arr, value) & (positions < 0)
+                positions[mask] = i
+            return positions
+
     def _nominal_match_mask(self, values: np.ndarray, target_value: Any) -> np.ndarray:
         arr = np.asarray(values)
         if arr.dtype != object:
@@ -1396,89 +1411,99 @@ class C45TreeClassifier:
             train_weights=None if train_weights is None else train_weights.copy(),
         )
 
-    def _find_best_numeric_split_candidate(
+    def _numeric_candidate_from_kernel(
         self,
-        x_feat: np.ndarray,
+        *,
+        feat: int,
+        total_weight: float,
+        sorted_local_idx: np.ndarray,
+        pos: int,
+        left_value: float,
+        right_value: float,
+        info_gain: float,
+        info_gain_adj: float,
+        intrinsic: float,
+        left_weight: float,
+        right_weight: float,
+        candidate_count: int,
+        known_weight: float,
+    ) -> Optional[dict[str, Any]]:
+        """Candidate dict for the best split a numba kernel found on `feat`."""
+        midpoint = float((left_value + right_value) * 0.5)
+        threshold = self._relocate_split_point(feat, midpoint) if self.make_split_point_actual_value else midpoint
+        missing_weight = max(total_weight - float(known_weight), 0.0)
+        best_local_gr = (float(info_gain_adj) / float(intrinsic)) if intrinsic > 0.0 else 0.0
+        if best_local_gr <= 0.0:
+            return None
+        return {
+            "split_type": "numeric",
+            "gain_ratio": float(best_local_gr),
+            "info_gain": float(info_gain),
+            "info_gain_adj": float(info_gain_adj),
+            "intrinsic": float(intrinsic),
+            "balance": float(min(left_weight, right_weight)),
+            "feature": int(feat),
+            "threshold": float(threshold),
+            "split_pos": int(pos),
+            "known_weight": float(known_weight),
+            "missing_weight": float(missing_weight),
+            "left_weight": float(left_weight),
+            "right_weight": float(right_weight),
+            "candidate_split_count": int(candidate_count),
+            "sorted_local_idx": sorted_local_idx,
+        }
+
+    def _numeric_candidates_batch(
+        self,
+        X_num: np.ndarray,
+        numeric_feats: list[int],
         y_sub: np.ndarray,
         weights: np.ndarray,
         total_weight: float,
-        feat: int,
-    ) -> Optional[dict[str, Any]]:
-        if self.use_numba_numeric_kernel and NUMBA_AVAILABLE:
-            max_thresholds = -1 if self.max_thresholds is None else int(self.max_thresholds)
-            x_feat_f64 = np.asarray(x_feat, dtype=np.float64)
-            y_sub_i64 = y_sub.astype(np.int64, copy=False)
-            w_f64 = np.asarray(weights, dtype=np.float64)
-            if self.n_classes_ == 2:
-                kernel_result = _find_best_binary_numeric_split_unsorted_numba(
-                    x_feat_f64,
-                    y_sub_i64,
-                    w_f64,
-                    float(total_weight),
-                    float(self.min_samples_leaf),
-                    int(self.n_classes_),
-                    max_thresholds,
-                    bool(self.use_mdl_correction),
-                )
-            else:
-                kernel_result = _find_best_multiclass_numeric_split_unsorted_numba(
-                    x_feat_f64,
-                    y_sub_i64,
-                    w_f64,
-                    float(total_weight),
-                    float(self.min_samples_leaf),
-                    int(self.n_classes_),
-                    max_thresholds,
-                    bool(self.use_mdl_correction),
-                )
-            ok, best_pos_numba, best_info_gain, best_info_gain_adj, intrinsic, best_left_weight, best_right_weight, total_candidate_points, known_weight_numba, sorted_local_idx = kernel_result
-            if ok == 0:
-                return None
-            pos = int(best_pos_numba)
-            left_value = float(x_feat_f64[int(sorted_local_idx[pos])])
-            right_value = float(x_feat_f64[int(sorted_local_idx[pos + 1])])
-            midpoint = float((left_value + right_value) * 0.5)
-            threshold = self._relocate_split_point(feat, midpoint) if self.make_split_point_actual_value else midpoint
-            missing_weight = max(total_weight - float(known_weight_numba), 0.0)
-            best_local_gr = (float(best_info_gain_adj) / float(intrinsic)) if intrinsic > 0.0 else 0.0
-            if best_local_gr <= 0.0:
-                return None
-            return {
-                "split_type": "numeric",
-                "gain_ratio": float(best_local_gr),
-                "info_gain": float(best_info_gain),
-                "info_gain_adj": float(best_info_gain_adj),
-                "intrinsic": float(intrinsic),
-                "balance": float(min(best_left_weight, best_right_weight)),
-                "feature": int(feat),
-                "threshold": float(threshold),
-                "split_pos": pos,
-                "known_weight": float(known_weight_numba),
-                "missing_weight": float(missing_weight),
-                "left_weight": float(best_left_weight),
-                "right_weight": float(best_right_weight),
-                "candidate_split_count": int(total_candidate_points),
-                "sorted_local_idx": np.asarray(sorted_local_idx, dtype=np.int32),
-            }
-
-        valid_mask = np.isfinite(x_feat)
-        if not np.any(valid_mask):
-            return None
-
-        known_local_idx = np.flatnonzero(valid_mask)
-        if known_local_idx.size == 0:
-            return None
-        x_valid = x_feat[known_local_idx]
-        order = np.argsort(x_valid, kind="mergesort")
-        sorted_local_idx = known_local_idx[order]
-        return self._evaluate_numeric_split_candidate_sorted(
-            x_feat=x_feat,
-            y_sub=y_sub,
-            weights=weights,
-            total_weight=total_weight,
-            feat=feat,
-            sorted_local_idx=sorted_local_idx,
+        sorted_orders: _SortedOrders,
+    ) -> dict[int, dict[str, Any]]:
+        """Best numeric split of every numeric feature in one numba call."""
+        if sorted_orders.feats != numeric_feats:
+            raise RuntimeError("sorted orders do not match the numeric feature layout")
+        orders_flat = sorted_orders.flat
+        offsets = sorted_orders.offsets
+        max_thresholds = -1 if self.max_thresholds is None else int(self.max_thresholds)
+        (ok, pos, info_gain, info_gain_adj, intrinsic, left_w, right_w,
+         counts, known_w, left_v, right_v) = _best_numeric_splits_batch_numba(
+            X_num,
+            y_sub.astype(np.int64, copy=False),
+            np.asarray(weights, dtype=np.float64),
+            orders_flat,
+            offsets,
+            float(total_weight),
+            float(self.min_samples_leaf),
+            int(self.n_classes_),
+            max_thresholds,
+            bool(self.use_mdl_correction),
+            max(2.0, 2.0 * float(self.min_samples_leaf)) - 1e-12,
         )
+        candidates: dict[int, dict[str, Any]] = {}
+        for j, feat in enumerate(numeric_feats):
+            if ok[j] == 0:
+                continue
+            candidate = self._numeric_candidate_from_kernel(
+                feat=feat,
+                total_weight=total_weight,
+                sorted_local_idx=sorted_orders[feat],
+                pos=int(pos[j]),
+                left_value=float(left_v[j]),
+                right_value=float(right_v[j]),
+                info_gain=float(info_gain[j]),
+                info_gain_adj=float(info_gain_adj[j]),
+                intrinsic=float(intrinsic[j]),
+                left_weight=float(left_w[j]),
+                right_weight=float(right_w[j]),
+                candidate_count=int(counts[j]),
+                known_weight=float(known_w[j]),
+            )
+            if candidate is not None:
+                candidates[feat] = candidate
+        return candidates
 
     def _evaluate_numeric_split_candidate_sorted(
         self,
@@ -1489,16 +1514,23 @@ class C45TreeClassifier:
         feat: int,
         sorted_local_idx: np.ndarray,
     ) -> Optional[dict[str, Any]]:
-        x_sorted = x_feat[sorted_local_idx]
-        y_sorted = y_sub[sorted_local_idx]
-        w_sorted = weights[sorted_local_idx].astype(np.float64, copy=False)
-        known_weight = float(np.sum(w_sorted))
+        use_numba = self.use_numba_numeric_kernel and NUMBA_AVAILABLE
+        if use_numba:
+            # One compiled pass instead of three gathers and a sum; this
+            # dominates on the many small nodes of a large unpruned tree.
+            x_sorted, y_sorted_i64, w_sorted, known_weight = _gather_sorted_numba(
+                x_feat, y_sub, weights, sorted_local_idx
+            )
+        else:
+            x_sorted = x_feat[sorted_local_idx]
+            y_sorted = y_sub[sorted_local_idx]
+            w_sorted = weights[sorted_local_idx].astype(np.float64, copy=False)
+            known_weight = float(np.sum(w_sorted))
         if known_weight < max(2.0, 2.0 * float(self.min_samples_leaf)) - 1e-12:
             return None
 
-        if self.use_numba_numeric_kernel and NUMBA_AVAILABLE:
+        if use_numba:
             max_thresholds = -1 if self.max_thresholds is None else int(self.max_thresholds)
-            y_sorted_i64 = y_sorted.astype(np.int64, copy=False)
             if self.n_classes_ == 2:
                 kernel_result = _find_best_binary_numeric_split_numba(
                     x_sorted,
@@ -1525,29 +1557,21 @@ class C45TreeClassifier:
             if ok == 0:
                 return None
             pos = int(best_pos_numba)
-            midpoint = float((x_sorted[pos] + x_sorted[pos + 1]) * 0.5)
-            threshold = self._relocate_split_point(feat, midpoint) if self.make_split_point_actual_value else midpoint
-            missing_weight = max(total_weight - float(known_weight_numba), 0.0)
-            best_local_gr = (float(best_info_gain_adj) / float(intrinsic)) if intrinsic > 0.0 else 0.0
-            if best_local_gr <= 0.0:
-                return None
-            return {
-                "split_type": "numeric",
-                "gain_ratio": float(best_local_gr),
-                "info_gain": float(best_info_gain),
-                "info_gain_adj": float(best_info_gain_adj),
-                "intrinsic": float(intrinsic),
-                "balance": float(min(best_left_weight, best_right_weight)),
-                "feature": int(feat),
-                "threshold": float(threshold),
-                "split_pos": pos,
-                "known_weight": float(known_weight_numba),
-                "missing_weight": float(missing_weight),
-                "left_weight": float(best_left_weight),
-                "right_weight": float(best_right_weight),
-                "candidate_split_count": int(total_candidate_points),
-                "sorted_local_idx": sorted_local_idx,
-            }
+            return self._numeric_candidate_from_kernel(
+                feat=feat,
+                total_weight=total_weight,
+                sorted_local_idx=sorted_local_idx,
+                pos=pos,
+                left_value=float(x_sorted[pos]),
+                right_value=float(x_sorted[pos + 1]),
+                info_gain=best_info_gain,
+                info_gain_adj=best_info_gain_adj,
+                intrinsic=intrinsic,
+                left_weight=best_left_weight,
+                right_weight=best_right_weight,
+                candidate_count=total_candidate_points,
+                known_weight=known_weight_numba,
+            )
 
         split_positions = np.where(x_sorted[:-1] + 1e-5 < x_sorted[1:])[0]
         if split_positions.size == 0:
@@ -1673,9 +1697,7 @@ class C45TreeClassifier:
         if known_weight < max(2.0, 2.0 * float(self.min_samples_leaf)) - 1e-12:
             return None
 
-        observed_values = list(
-            dict.fromkeys(self._normalize_nominal_value(v) for v in x_valid.tolist())
-        )
+        observed_values = self._observed_nominal_values(x_valid)
         value_order = self._nominal_domain_values(feat, observed_values)
         if len(value_order) <= 1:
             return None
@@ -1684,26 +1706,23 @@ class C45TreeClassifier:
         branch_weights: list[float] = []
         branch_counts: list[np.ndarray] = []
         min_leaf = float(self.min_samples_leaf)
-        for value in value_order:
-            branch_mask = self._nominal_match_mask(x_valid, value)
+        # Every known value is in `value_order` (domain + observed values).
+        positions = self._nominal_value_positions(x_valid, value_order)
+        n_values = len(value_order)
+        weight_per_value = np.bincount(positions, weights=w_valid, minlength=n_values)
+        counts_per_value = np.bincount(
+            positions * self.n_classes_ + y_valid,
+            weights=w_valid,
+            minlength=n_values * self.n_classes_,
+        ).reshape(n_values, self.n_classes_)
+        for i, value in enumerate(value_order):
             branch_values.append(value)
-            if not np.any(branch_mask):
+            if weight_per_value[i] <= 1e-12:
                 branch_weights.append(0.0)
                 branch_counts.append(np.zeros(self.n_classes_, dtype=np.float64))
-                continue
-            branch_weight = float(np.sum(w_valid[branch_mask]))
-            if branch_weight <= 1e-12:
-                branch_weights.append(0.0)
-                branch_counts.append(np.zeros(self.n_classes_, dtype=np.float64))
-                continue
-            branch_weights.append(branch_weight)
-            branch_counts.append(
-                np.bincount(
-                    y_valid[branch_mask],
-                    weights=w_valid[branch_mask],
-                    minlength=self.n_classes_,
-                ).astype(np.float64, copy=False)
-            )
+            else:
+                branch_weights.append(float(weight_per_value[i]))
+                branch_counts.append(counts_per_value[i])
 
         if len(branch_values) <= 1:
             return None
@@ -1774,12 +1793,18 @@ class C45TreeClassifier:
         if known_weight < max(2.0, 2.0 * float(self.min_samples_leaf)) - 1e-12:
             return None
 
-        observed_values = list(
-            dict.fromkeys(self._normalize_nominal_value(v) for v in x_valid.tolist())
-        )
+        observed_values = self._observed_nominal_values(x_valid)
         value_order = self._nominal_domain_values(feat, observed_values)
         if len(value_order) <= 1:
             return None
+        positions = self._nominal_value_positions(x_valid, value_order)
+        weight_per_value = np.bincount(positions, weights=w_valid, minlength=len(value_order))
+        counts_per_value = np.bincount(
+            positions * self.n_classes_ + y_valid,
+            weights=w_valid,
+            minlength=len(value_order) * self.n_classes_,
+        ).reshape(len(value_order), self.n_classes_)
+        rows_per_value = np.bincount(positions, minlength=len(value_order))
 
         min_leaf = float(self.min_samples_leaf)
         feat_counts = np.bincount(
@@ -1792,20 +1817,14 @@ class C45TreeClassifier:
         best_rank: Optional[tuple[float, float, float, int]] = None
 
         for value_idx, value in enumerate(value_order):
-            branch_mask = self._nominal_match_mask(x_valid, value)
-            if not np.any(branch_mask) or np.all(branch_mask):
+            if rows_per_value[value_idx] == 0 or rows_per_value[value_idx] == positions.size:
                 continue
-
-            pos_weight = float(np.sum(w_valid[branch_mask]))
+            pos_weight = float(weight_per_value[value_idx])
             neg_weight = known_weight - pos_weight
             if pos_weight < min_leaf - 1e-12 or neg_weight < min_leaf - 1e-12:
                 continue
 
-            pos_counts = np.bincount(
-                y_valid[branch_mask],
-                weights=w_valid[branch_mask],
-                minlength=self.n_classes_,
-            ).astype(np.float64, copy=False)
+            pos_counts = counts_per_value[value_idx]
             neg_counts = feat_counts - pos_counts
 
             child_entropy = (
@@ -1864,9 +1883,15 @@ class C45TreeClassifier:
         weights: np.ndarray,
         depth: int,
         path_conditions: Optional[list[str]] = None,
+        sorted_orders: Optional[_SortedOrders | list[_SortedOrders]] = None,
     ) -> _Node:
         """
         Recursively build a C4.5 subtree.
+
+        `sorted_orders` maps each numeric feature to the node-local positions
+        of its known values in ascending order. It is computed once at the
+        root and narrowed for each child, so numeric features are never
+        re-sorted below the root.
 
         Parameters
         ----------
@@ -1885,6 +1910,11 @@ class C45TreeClassifier:
             Constructed node (leaf or internal node).
         """
         current_path = list(path_conditions or [])
+        if isinstance(sorted_orders, list):
+            # Handoff from the parent (see the recursive calls below): take
+            # sole ownership so the orders are freed as soon as this node is
+            # done with them, not when the whole subtree returns.
+            sorted_orders = sorted_orders.pop() if sorted_orders else None
 
         if indices.size == 0:
             empty_counts = np.zeros(self.n_classes_, dtype=np.float64)
@@ -1898,6 +1928,10 @@ class C45TreeClassifier:
 
         weights = np.asarray(weights, dtype=np.float64)
         keep_mask = weights > 1e-12
+        if sorted_orders is not None and not np.all(keep_mask):
+            sorted_orders = self._subset_sorted_orders(
+                sorted_orders, np.flatnonzero(keep_mask), keep_mask.size
+            )
         indices = indices[keep_mask]
         weights = weights[keep_mask]
 
@@ -1953,11 +1987,52 @@ class C45TreeClassifier:
 
         # --- Search for the best split according to Gain Ratio. ---
 
+        numeric_feats = [feat for feat in range(self.n_features_) if not self._is_nominal_feature(feat)]
+        batch_numeric = (
+            self.use_numba_numeric_kernel
+            and NUMBA_AVAILABLE
+            and X.dtype == np.float64
+            and bool(numeric_feats)
+        )
+        if batch_numeric:
+            # Encoded fast backend: one gather for all numeric columns, then
+            # a single compiled split search over them.
+            is_full_matrix = indices.size == X.shape[0] and np.array_equal(indices, np.arange(X.shape[0]))
+            if is_full_matrix and len(numeric_feats) == X.shape[1]:
+                X_num = X  # root of an all-numeric fit: no copy needed
+            else:
+                X_num = X[np.ix_(indices, numeric_feats)]
+            column_slot = {feat: j for j, feat in enumerate(numeric_feats)}
+            numeric_column = lambda feat: X_num[:, column_slot[feat]]  # noqa: E731
+        elif X.dtype == object:
+            # Object matrices: coercion is a per-value Python loop, so convert
+            # each column once per node. The memo is dropped before recursing.
+            column_memo: dict[int, np.ndarray] = {}
+
+            def numeric_column(feat: int) -> np.ndarray:
+                column = column_memo.get(feat)
+                if column is None:
+                    column = column_memo[feat] = self._coerce_numeric_column(X[indices, feat])
+                return column
+        else:
+            # Numeric matrices: a column is a cheap gather, so materialize one
+            # at a time to keep peak memory low.
+            numeric_column = lambda feat: self._coerce_numeric_column(X[indices, feat])  # noqa: E731
+        if sorted_orders is None:
+            sorted_orders = self._initial_sorted_orders(numeric_feats, numeric_column)
+        numeric_batch_candidates: Optional[dict[int, dict[str, Any]]] = None
+        if batch_numeric:
+            numeric_batch_candidates = self._numeric_candidates_batch(
+                X_num, numeric_feats, y_sub, weights, total_weight, sorted_orders
+            )
+            # The chosen column is re-read from X below if needed.
+            X_num = None
+
         split_candidates = []
 
         for feat in range(self.n_features_):
-            raw_feat = X[indices, feat]
             if self._is_nominal_feature(feat):
+                raw_feat = X[indices, feat]
                 if self.binary_splits:
                     candidate = self._find_best_binary_nominal_split_candidate(
                         raw_feat, y_sub, weights, total_weight, feat
@@ -1966,13 +2041,24 @@ class C45TreeClassifier:
                     candidate = self._find_best_nominal_split_candidate(
                         raw_feat, y_sub, weights, total_weight, feat
                     )
+            elif numeric_batch_candidates is not None:
+                candidate = numeric_batch_candidates.get(feat)
             else:
-                numeric_feat = self._coerce_numeric_column(raw_feat)
-                candidate = self._find_best_numeric_split_candidate(
-                    numeric_feat, y_sub, weights, total_weight, feat
+                candidate = self._evaluate_numeric_split_candidate_sorted(
+                    x_feat=numeric_column(feat),
+                    y_sub=y_sub,
+                    weights=weights,
+                    total_weight=total_weight,
+                    feat=feat,
+                    sorted_local_idx=sorted_orders[feat],
                 )
             if candidate is not None:
                 split_candidates.append(candidate)
+
+        # Keep only the column that may be split on; release the rest before
+        # recursing so per-node copies do not accumulate along the path.
+        numeric_column = None
+        column_memo = None
 
         if not split_candidates:
             return self._make_leaf_node(
@@ -2033,33 +2119,43 @@ class C45TreeClassifier:
                 train_weights=weights,
             )
 
+        # Candidates hold views into this node's order buffer; drop them so
+        # the buffer can be freed before recursing.
+        split_candidates = prefilter_candidates = numeric_batch_candidates = None
+        candidate = eligible = None
+
         feat_values = X[indices, best_feature]
         if best["split_type"] == "nominal":
             missing_mask = self._feature_missing_mask(feat_values)
             valid_mask = ~missing_mask
             known_idx = indices[valid_mask]
+            known_pos = np.flatnonzero(valid_mask)
             known_w = weights[valid_mask].astype(np.float64, copy=False)
             known_values = np.asarray(feat_values[valid_mask])
 
             branch_idx_parts: dict[Any, list[np.ndarray]] = {value: [] for value in best["values"]}
             branch_w_parts: dict[Any, list[np.ndarray]] = {value: [] for value in best["values"]}
+            branch_pos_parts: dict[Any, list[np.ndarray]] = {value: [] for value in best["values"]}
             matched_mask = np.zeros(known_idx.size, dtype=bool)
-            for value in best["values"]:
-                if value == _NOMINAL_OTHER_BRANCH:
-                    continue
-                branch_mask = self._nominal_match_mask(known_values, value)
+            explicit_values = [value for value in best["values"] if value != _NOMINAL_OTHER_BRANCH]
+            value_positions = self._nominal_value_positions(known_values, explicit_values)
+            for value_idx, value in enumerate(explicit_values):
+                branch_mask = value_positions == value_idx
                 if np.any(branch_mask):
                     branch_idx_parts[value].append(known_idx[branch_mask])
                     branch_w_parts[value].append(known_w[branch_mask])
+                    branch_pos_parts[value].append(known_pos[branch_mask])
                     matched_mask |= branch_mask
 
             if np.any(~matched_mask):
                 default_value = best["default_child"]
                 branch_idx_parts[default_value].append(known_idx[~matched_mask])
                 branch_w_parts[default_value].append(known_w[~matched_mask])
+                branch_pos_parts[default_value].append(known_pos[~matched_mask])
 
             if np.any(missing_mask):
                 missing_idx = indices[missing_mask]
+                missing_pos = np.flatnonzero(missing_mask)
                 missing_w = weights[missing_mask].astype(np.float64, copy=False)
                 if self.enable_fractional_missing:
                     for value in best["values"]:
@@ -2068,11 +2164,16 @@ class C45TreeClassifier:
                         if np.any(keep):
                             branch_idx_parts[value].append(missing_idx[keep])
                             branch_w_parts[value].append(routed_w[keep])
+                            branch_pos_parts[value].append(missing_pos[keep])
                 else:
                     default_value = best["default_child"]
                     branch_idx_parts[default_value].append(missing_idx)
                     branch_w_parts[default_value].append(missing_w)
+                    branch_pos_parts[default_value].append(missing_pos)
 
+            # Narrowing costs O(parent size) per child, re-sorting a child
+            # O(c log c): only narrow when the branch count is small.
+            narrow_orders = len(best["values"]) <= max(2.0, np.log2(max(indices.size, 2)))
             children = {}
             for value in best["values"]:
                 child_idx, child_w = self._concat_weighted_parts(
@@ -2091,6 +2192,10 @@ class C45TreeClassifier:
                 else:
                     child_condition = self._export_branch_condition("nominal", best_feature, None, value)
                     child_path = current_path + ([child_condition] if child_condition is not None else [])
+                    child_orders = []
+                    if narrow_orders:
+                        child_pos = np.concatenate(branch_pos_parts[value])
+                        child_orders.append(self._subset_sorted_orders(sorted_orders, child_pos, indices.size))
                     children[value] = self._build_tree(
                         X,
                         y,
@@ -2098,6 +2203,7 @@ class C45TreeClassifier:
                         child_w,
                         depth + 1,
                         path_conditions=child_path,
+                        sorted_orders=child_orders,
                     )
 
             node = _Node(
@@ -2121,10 +2227,12 @@ class C45TreeClassifier:
             )
             return self._maybe_collapse_unpruned_split(node)
 
-        known_local_sorted = np.asarray(best.get("sorted_local_idx"), dtype=np.int32)
+        known_local_sorted = np.asarray(best.pop("sorted_local_idx"), dtype=np.int32)
         sorted_weights = weights[known_local_sorted]
-        best_left_idx = indices[known_local_sorted[: best["split_pos"] + 1]]
-        best_right_idx = indices[known_local_sorted[best["split_pos"] + 1:]]
+        left_pos = known_local_sorted[: best["split_pos"] + 1]
+        right_pos = known_local_sorted[best["split_pos"] + 1:]
+        best_left_idx = indices[left_pos]
+        best_right_idx = indices[right_pos]
         best_left_w = sorted_weights[: best["split_pos"] + 1].astype(np.float64, copy=False)
         best_right_w = sorted_weights[best["split_pos"] + 1:].astype(np.float64, copy=False)
 
@@ -2138,6 +2246,7 @@ class C45TreeClassifier:
         missing_mask = ~np.isfinite(numeric_feat)
         if np.any(missing_mask):
             missing_idx = indices[missing_mask]
+            missing_pos = np.flatnonzero(missing_mask)
             missing_w = weights[missing_mask].astype(np.float64, copy=False)
             if self.enable_fractional_missing and missing_idx.size > 0:
                 left_missing_w = missing_w * left_prob
@@ -2147,19 +2256,31 @@ class C45TreeClassifier:
                 if np.any(left_keep):
                     best_left_idx = np.concatenate((best_left_idx, missing_idx[left_keep]))
                     best_left_w = np.concatenate((best_left_w, left_missing_w[left_keep]))
+                    left_pos = np.concatenate((left_pos, missing_pos[left_keep]))
                 if np.any(right_keep):
                     best_right_idx = np.concatenate((best_right_idx, missing_idx[right_keep]))
                     best_right_w = np.concatenate((best_right_w, right_missing_w[right_keep]))
+                    right_pos = np.concatenate((right_pos, missing_pos[right_keep]))
             else:
                 if missing_go_to_left:
                     best_left_idx = np.concatenate((best_left_idx, missing_idx))
                     best_left_w = np.concatenate((best_left_w, missing_w))
+                    left_pos = np.concatenate((left_pos, missing_pos))
                 else:
                     best_right_idx = np.concatenate((best_right_idx, missing_idx))
                     best_right_w = np.concatenate((best_right_w, missing_w))
+                    right_pos = np.concatenate((right_pos, missing_pos))
 
         left_condition = self._export_branch_condition("numeric", best_feature, best_threshold, "left")
         right_condition = self._export_branch_condition("numeric", best_feature, best_threshold, "right")
+        numeric_feat = None
+        # Narrow the orders for both children up front and release the
+        # parent's, so only the pending right child's orders stay alive while
+        # the left subtree is built.
+        left_orders = self._subset_sorted_orders(sorted_orders, left_pos, indices.size)
+        right_orders = self._subset_sorted_orders(sorted_orders, right_pos, indices.size)
+        sorted_orders = known_local_sorted = left_pos = right_pos = None
+        left_handoff, left_orders = [left_orders], None
         left_child = self._build_tree(
             X,
             y,
@@ -2167,7 +2288,9 @@ class C45TreeClassifier:
             best_left_w,
             depth + 1,
             path_conditions=current_path + ([left_condition] if left_condition is not None else []),
+            sorted_orders=left_handoff,
         )
+        right_handoff, right_orders = [right_orders], None
         right_child = self._build_tree(
             X,
             y,
@@ -2175,6 +2298,7 @@ class C45TreeClassifier:
             best_right_w,
             depth + 1,
             path_conditions=current_path + ([right_condition] if right_condition is not None else []),
+            sorted_orders=right_handoff,
         )
 
         node = _Node(
@@ -2199,6 +2323,55 @@ class C45TreeClassifier:
             split_missing_weight=float(best["missing_weight"]),
         )
         return self._maybe_collapse_unpruned_split(node)
+
+    @staticmethod
+    def _initial_sorted_orders(feats: list[int], column_of) -> _SortedOrders:
+        """
+        Stable ascending order of the known values of each numeric feature.
+
+        `column_of(feat)` returns the node's values for `feat`; it is called
+        twice per feature so only one column needs to be alive at a time.
+        """
+        offsets = np.zeros(len(feats) + 1, dtype=np.int64)
+        offsets[1:] = np.cumsum([np.count_nonzero(np.isfinite(column_of(feat))) for feat in feats])
+        # Fill one int32 buffer directly (no per-feature int64 copies).
+        flat = np.empty(int(offsets[-1]), dtype=np.int32)
+        for j, feat in enumerate(feats):
+            column = column_of(feat)
+            known = np.flatnonzero(np.isfinite(column))
+            flat[offsets[j]:offsets[j + 1]] = known[np.argsort(column[known], kind="mergesort")]
+        return _SortedOrders(list(feats), flat, offsets)
+
+    def _subset_sorted_orders(
+        self,
+        orders: _SortedOrders,
+        positions: np.ndarray,
+        n_positions: int,
+    ) -> _SortedOrders:
+        """
+        Narrow per-feature sorted orders to a child node.
+
+        `positions` lists, in child order, the parent-local positions that
+        form the child (each at most once). The result is expressed in
+        child-local positions and keeps the ascending order without sorting.
+        """
+        if self.use_numba_numeric_kernel and NUMBA_AVAILABLE:
+            flat, offsets = _subset_orders_numba(
+                orders.flat,
+                orders.offsets,
+                np.asarray(positions, dtype=np.int64),
+                int(n_positions),
+            )
+            return _SortedOrders(orders.feats, flat, offsets)
+
+        remap = np.full(n_positions, -1, dtype=np.int32)
+        remap[positions] = np.arange(positions.size, dtype=np.int32)
+        mapped = remap[orders.flat]
+        keep = mapped >= 0
+        offsets = np.zeros_like(orders.offsets)
+        for j in range(len(orders.feats)):
+            offsets[j + 1] = offsets[j] + np.count_nonzero(keep[orders.offsets[j]:orders.offsets[j + 1]])
+        return _SortedOrders(orders.feats, mapped[keep], offsets)
 
     def _relocate_split_point(self, feature_index: int, threshold: float) -> float:
         """

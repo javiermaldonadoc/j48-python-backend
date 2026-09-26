@@ -128,9 +128,16 @@ J48_WEKA_CLASSPATH=weka-stable-3.8.6.jar:bounce-0.18.jar python -m pytest -m wek
 
 Known divergences are listed in the test file as expected failures. CI runs all of the above on every pull request.
 
+## Choosing an estimator
+
+- `J48Classifier` is the reference line used for WEKA comparisons. It is pure NumPy.
+- `J48FastClassifier` builds the same trees (verified by the test suite, including exact ties) from an encoded representation and uses numba kernels when `numba` is installed. In the 0.4.0 benchmarks it trains 1.8x faster than `J48Classifier` on 100k x 20 numeric rows, 2.4x faster with 5 nominal columns and 7x faster on IDS-like data with a 70-value `service` attribute. Call `warmup_backend()` once to exclude numba compilation from timings.
+
+See [CHANGELOG.md](CHANGELOG.md) for benchmark details.
+
 ## Input conventions
 
-The estimators follow scikit-learn conventions (2D `X`, 1D `y`, explicit errors for sparse input, continuous or missing targets, and all-zero weights), with two J48-specific allowances: missing feature values (`NaN`, `None`, `"?"`; infinity is treated as missing) and non-numeric nominal columns are accepted directly.
+The estimators follow scikit-learn conventions (2D `X`, 1D `y`, explicit errors for sparse input, continuous or missing targets, all-zero weights, and DataFrames whose column names or order differ from those seen in `fit`), with two J48-specific allowances: missing feature values (`NaN`, `None`, `"?"`, `pd.NA`; infinity is treated as missing) and non-numeric nominal columns are accepted directly.
 
 ## Validation and paper context
 

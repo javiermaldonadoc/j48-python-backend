@@ -12,6 +12,17 @@ from .core import C45TreeClassifier, warmup_numba_numeric_kernel
 from .engine import J48EngineSpec, build_engine
 
 
+def _string_column_names(X: Any) -> Optional[list[str]]:
+    """DataFrame column names, only when all of them are strings (as scikit-learn)."""
+    columns = getattr(X, "columns", None)
+    if columns is None:
+        return None
+    names = list(columns)
+    if not names or not all(isinstance(name, str) for name in names):
+        return None
+    return names
+
+
 def _input_shape(X: Any) -> tuple[int, ...]:
     shape = getattr(X, "shape", None)
     if shape is None:
@@ -148,6 +159,9 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
             auto_detect_nominal=self.auto_detect_nominal,
             nominal_value_domains=self.nominal_value_domains,
         )
+        # String column names seen in fit; predict() requires the same names in
+        # the same order when it also receives such a DataFrame.
+        fit_bundle["column_names"] = _string_column_names(X)
         return self.fit_prepared_bundle(fit_bundle, sample_weight=sample_weight)
 
     def _validate_params(self) -> None:
@@ -194,6 +208,20 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
                 f"X has {shape[1]} features, but {name} is expecting "
                 f"{self.n_features_in_} features as input."
             )
+        fitted_columns = getattr(self, "_fit_column_names_", None)
+        names = _string_column_names(X)
+        if not reset and fitted_columns is not None and names is not None:
+            if names != fitted_columns:
+                mismatched = [
+                    f"position {i}: fitted {expected!r}, got {got!r}"
+                    for i, (expected, got) in enumerate(zip(fitted_columns, names))
+                    if expected != got
+                ]
+                raise ValueError(
+                    "The feature names should match those that were passed during fit "
+                    "(same names in the same order; columns are used by position). "
+                    + "; ".join(mismatched[:5])
+                )
 
     def _validate_y(self, y: Any) -> np.ndarray:
         if y is None:
@@ -219,6 +247,7 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
     ) -> "J48Classifier":
         self._validate_params()
         self._ensure_engine()
+        self._fit_column_names_ = fit_bundle.get("column_names")
         feature_names = fit_bundle["feature_names"]
         X_arr = fit_bundle["X"]
         y_arr = fit_bundle["y"]

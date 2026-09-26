@@ -145,3 +145,64 @@ def test_pickle_and_clone(cls, iris):
     restored = pickle.loads(pickle.dumps(clf))
     np.testing.assert_array_equal(restored.predict(X), clf.predict(X))
     assert clone(clf).get_params() == clf.get_params()
+
+
+@pytest.mark.parametrize("cls", ESTIMATORS)
+def test_predict_rejects_reordered_or_renamed_columns(cls):
+    pd = pytest.importorskip("pandas")
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({"proto": rng.choice(["tcp", "udp"], 200), "bytes": rng.normal(size=200), "dur": rng.normal(size=200)})
+    y = ((df["proto"] == "tcp") & (df["bytes"] > 0)).astype(int).to_numpy()
+    clf = cls(nominal_features=[0]).fit(df, y)
+
+    # Columns are used by position, so a reordered frame used to be scored
+    # silently with the wrong columns.
+    with pytest.raises(ValueError, match="feature names should match"):
+        clf.predict(df[["bytes", "proto", "dur"]])
+    with pytest.raises(ValueError, match="feature names should match"):
+        clf.predict_proba(df.rename(columns={"bytes": "pkts"}))
+    # Same order, or plain arrays, keep working.
+    np.testing.assert_array_equal(clf.predict(df.copy()), clf.predict(df.to_numpy(dtype=object)))
+
+
+@pytest.mark.parametrize("cls", ESTIMATORS)
+def test_pandas_nullable_dtypes_and_pd_na(cls):
+    pd = pytest.importorskip("pandas")
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({"proto": rng.choice(["tcp", "udp"], 300), "pkts": rng.integers(0, 50, 300), "dur": rng.normal(size=300)})
+    y = ((df["proto"] == "tcp") & (df["pkts"] > 20)).astype(int).to_numpy()
+    nullable = df.convert_dtypes()  # string / Int64 / Float64 extension dtypes
+    nullable.loc[::7, "pkts"] = pd.NA
+    nullable.loc[::11, "proto"] = pd.NA
+    reference = df.astype(object)
+    reference.loc[::7, "pkts"] = None
+    reference.loc[::11, "proto"] = None
+
+    clf = cls(nominal_features=[0]).fit(nullable, y)
+    expected = cls(nominal_features=[0]).fit(reference, y)
+    # pd.NA is a missing value, exactly like None.
+    assert clf.export_tree() == expected.export_tree()
+    np.testing.assert_array_equal(clf.predict(nullable), expected.predict(reference))
+    # A model fitted on NumPy-backed dtypes can score nullable frames.
+    plain = cls(nominal_features=[0]).fit(df, y)
+    np.testing.assert_array_equal(plain.predict(df.convert_dtypes()), plain.predict(df))
+
+
+@pytest.mark.parametrize("cls", ESTIMATORS)
+def test_column_name_check_follows_scikit_learn_rules(cls):
+    pd = pytest.importorskip("pandas")
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(120, 2))
+    y = (X[:, 0] > 0).astype(int)
+
+    # Non-string labels (e.g. pd.DataFrame(ndarray)) are not treated as names.
+    clf = cls().fit(pd.DataFrame(X), y)
+    clf.predict(pd.DataFrame(X, columns=["a", "b"]))
+
+    # A refit through fit_prepared_bundle replaces the recorded names.
+    clf = cls().fit(pd.DataFrame(X, columns=["a", "b"]), y)
+    frame_cd = pd.DataFrame(X, columns=["c", "d"])
+    bundle = clf.engine_.prepare_fit_bundle(frame_cd, y)
+    clf.fit_prepared_bundle(bundle)
+    clf.predict(frame_cd)
+
