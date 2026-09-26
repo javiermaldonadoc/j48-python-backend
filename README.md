@@ -113,7 +113,24 @@ python -m pip install -e ".[all,test]"
 python -m pytest
 ```
 
-The suite covers the regressions fixed in each release and checks that `J48FastClassifier` reproduces `J48Classifier` (trees, predictions and probabilities) across the main J48 configurations.
+The suite covers the regressions fixed in each release, scikit-learn API conformance (`check_estimator`), and checks that `J48FastClassifier` reproduces `J48Classifier` (trees, predictions and probabilities) across the main J48 configurations.
+
+### WEKA parity tests
+
+`tests/test_weka_parity.py` fits WEKA's J48 and `J48Classifier` on the same random ARFF splits for 9 option sets (`-U`, `-O`, `-S`, `-B`, `-A`, `-R`, `-C/-M`, ...) and compares tree size, number of leaves and test predictions. It needs Java and a WEKA 3.8 classpath:
+
+```bash
+base=https://repo1.maven.org/maven2/nz/ac/waikato/cms/weka
+curl -sSfLO $base/weka-stable/3.8.6/weka-stable-3.8.6.jar
+curl -sSfLO $base/thirdparty/bounce/0.18/bounce-0.18.jar
+J48_WEKA_CLASSPATH=weka-stable-3.8.6.jar:bounce-0.18.jar python -m pytest -m weka
+```
+
+Known divergences are listed in the test file as expected failures. CI runs all of the above on every pull request.
+
+## Input conventions
+
+The estimators follow scikit-learn conventions (2D `X`, 1D `y`, explicit errors for sparse input, continuous or missing targets, and all-zero weights), with two J48-specific allowances: missing feature values (`NaN`, `None`, `"?"`; infinity is treated as missing) and non-numeric nominal columns are accepted directly.
 
 ## Validation and paper context
 
@@ -149,7 +166,7 @@ The public artifact is intended to be consumed through tagged releases.
 
 For manuscript alignment, cite the exact tag and commit used by the paper instead of the moving default branch.
 
-The current release is `0.2.0`, a correctness release: on ordinary inputs it builds the same trees as `0.1.x`, but it fixes defects that affected scikit-learn metric compatibility, in-place modified inputs in the fast backend, and integer features above 2^24 in the strict line. See [CHANGELOG.md](CHANGELOG.md) for the exact scope of each change.
+Releases after the paper snapshot (`0.2.0` and later) contain correctness fixes, stricter scikit-learn input validation and WEKA parity tests; on ordinary inputs they build the same trees as `0.1.x`. See [CHANGELOG.md](CHANGELOG.md) for the exact scope of each change.
 
 ## Status
 

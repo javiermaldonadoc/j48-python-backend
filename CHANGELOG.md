@@ -4,6 +4,67 @@ All notable changes to this project are documented in this file.
 The project follows [Semantic Versioning](https://semver.org/); while the
 version is `0.x`, a minor bump may change public behavior.
 
+## [0.3.0] - 2026-09-26
+
+scikit-learn conformance and WEKA parity release. Trees are unchanged
+versus 0.2.0 except with `unpruned=True, collapse_tree=False` (see Fixed):
+the 192-configuration comparison against 0.2.0 gives identical trees,
+predictions and probabilities.
+
+### Fixed
+
+- **`collapse_tree=False` is honored for unpruned trees** (J48 `-U -O`).
+  Subtrees were always collapsed in unpruned mode. As in WEKA's
+  `C45PruneableClassifierTree`, collapsing now only happens when
+  `collapse_tree=True`. Against `weka.jar` 3.8.6, `-U -O` trees went from
+  4/24 to 24/24 identical.
+- Nominal matching no longer relies on NumPy comparing numeric arrays with
+  strings, which returns a scalar (and a `FutureWarning`) on NumPy < 2.
+
+### Changed (input validation, scikit-learn conventions)
+
+- `predict()` / `predict_proba()` raise `ValueError` for 1D input instead
+  of treating it as a single row; use `X.reshape(1, -1)`.
+  (`predict_prepared()` / `predict_proba_prepared()` keep accepting it.)
+- Feature-count mismatches raise the scikit-learn message
+  `X has N features, but <Estimator> is expecting M features as input.`
+- `fit()` now rejects, with explicit errors: `y=None`; continuous
+  (regression) targets; `y` containing NaN or infinity (drop those rows
+  first; WEKA also discards instances with a missing class); sparse `X`
+  (`TypeError`); empty `X` (0 samples or 0 features); complex data; and
+  `sample_weight` that is all zeros.
+- A column-vector `y` is raveled with a `DataConversionWarning`.
+- Missing values (NaN, None, `"?"`, and infinity, which is treated as
+  missing) and non-numeric nominal columns are still accepted, as before.
+- Predicting on 0 rows still returns an empty array.
+- Added `__sklearn_tags__` (scikit-learn >= 1.6) alongside `_more_tags`.
+
+`check_estimator` now passes except for one documented, by-design failure:
+`check_sample_weight_equivalence_on_dense_data`. WEKA's J48 itself does not
+treat integer weights as repeated rows (verified with `weka.jar`: 1/20
+random cases equivalent with zero weights, 11/20 without), so the package
+keeps WEKA's semantics.
+
+### Added
+
+- `tests/test_weka_parity.py`: differential tests against WEKA's J48 over 9
+  option sets x 24 datasets (numeric/nominal, with/without missing values),
+  comparing tree size, leaves and test predictions. Enabled by setting
+  `J48_WEKA_CLASSPATH`; 9 known divergences, all with nominal attributes,
+  are listed as strict expected failures.
+- `tests/test_sklearn_compat.py`: `parametrize_with_checks` for both
+  estimators plus tests for each validation rule.
+- GitHub Actions workflow: Python 3.10-3.13, a run without numba, a run on
+  the oldest supported dependencies (NumPy 1.23, scikit-learn 1.2, SciPy
+  1.10, pandas 1.5, numba 0.58), and the WEKA parity suite on WEKA 3.8.6.
+
+### Known limitations
+
+- With a nominal attribute, J48 can still differ from WEKA in a few cases
+  (listed in `tests/test_weka_parity.py`), mostly with `-R` and `-B`.
+- With instance weights that include zeros, trees can differ from WEKA,
+  which keeps zero-weight rows as candidate split boundaries.
+
 ## [0.2.0] - 2026-09-26
 
 Correctness release. On ordinary inputs the trees are unchanged: fitting
@@ -67,6 +128,7 @@ below only affect the cases described.
 
 - Paper-facing artifact snapshot.
 
+[0.3.0]: https://github.com/javiermaldonadoc/j48-python-backend/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/javiermaldonadoc/j48-python-backend/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/javiermaldonadoc/j48-python-backend/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/javiermaldonadoc/j48-python-backend/releases/tag/v0.1.0

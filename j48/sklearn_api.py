@@ -3,11 +3,30 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import numpy as np
+from scipy import sparse
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.utils.validation import check_is_fitted
+from sklearn.utils.multiclass import check_classification_targets
+from sklearn.utils.validation import check_is_fitted, column_or_1d
 
 from .core import C45TreeClassifier, warmup_numba_numeric_kernel
 from .engine import J48EngineSpec, build_engine
+
+
+def _input_shape(X: Any) -> tuple[int, ...]:
+    shape = getattr(X, "shape", None)
+    if shape is None:
+        shape = np.asarray(X, dtype=object).shape
+    return tuple(int(v) for v in shape)
+
+
+def _is_complex_input(X: Any) -> bool:
+    dtypes = getattr(X, "dtypes", None)
+    if dtypes is not None:
+        return any(getattr(dtype, "kind", "") == "c" for dtype in list(dtypes))
+    dtype = getattr(X, "dtype", None)
+    if dtype is None:
+        dtype = np.asarray(X).dtype
+    return np.dtype(dtype).kind == "c"
 
 
 class J48Classifier(ClassifierMixin, BaseEstimator):
@@ -77,12 +96,9 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
         y: Any,
         sample_weight: Optional[np.ndarray] = None,
     ) -> "J48Classifier":
-        if self.unpruned and self.reduced_error_pruning:
-            raise ValueError("unpruned=True is incompatible with reduced_error_pruning=True")
-        if int(self.min_num_obj) < 1:
-            raise ValueError("min_num_obj must be >= 1")
-        if int(self.num_folds) < 2 and self.reduced_error_pruning:
-            raise ValueError("num_folds must be >= 2 when reduced_error_pruning=True")
+        self._validate_params()
+        self._validate_X(X, reset=True)
+        y = self._validate_y(y)
 
         self.engine_ = build_engine(backend=self.backend, fidelity=self.fidelity)
         fit_bundle = self.engine_.prepare_fit_bundle(
@@ -95,6 +111,62 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
         )
         return self.fit_prepared_bundle(fit_bundle, sample_weight=sample_weight)
 
+    def _validate_params(self) -> None:
+        if self.unpruned and self.reduced_error_pruning:
+            raise ValueError("unpruned=True is incompatible with reduced_error_pruning=True")
+        if int(self.min_num_obj) < 1:
+            raise ValueError("min_num_obj must be >= 1")
+        if int(self.num_folds) < 2 and self.reduced_error_pruning:
+            raise ValueError("num_folds must be >= 2 when reduced_error_pruning=True")
+
+    def _validate_X(self, X: Any, *, reset: bool) -> None:
+        """
+        scikit-learn-style checks on the raw feature matrix.
+
+        Values are not converted or checked for finiteness here: missing
+        values (NaN, None, "?") and non-numeric nominal columns are valid J48
+        input and are handled by the engine.
+        """
+        name = type(self).__name__
+        if sparse.issparse(X):
+            raise TypeError(
+                f"{name} does not support sparse input. "
+                "Convert it to a dense array first, e.g. with X.toarray()."
+            )
+        shape = _input_shape(X)
+        if len(shape) != 2:
+            raise ValueError(
+                f"Expected a 2D array, got a {len(shape)}D array instead. "
+                "Reshape your data using array.reshape(-1, 1) if it has a single "
+                "feature or array.reshape(1, -1) if it contains a single sample."
+            )
+        if reset and shape[0] < 1:
+            raise ValueError(
+                f"Found array with 0 sample(s) (shape={shape}) while a minimum of 1 is required by {name}."
+            )
+        if shape[1] < 1:
+            raise ValueError(
+                f"Found array with 0 feature(s) (shape={shape}) while a minimum of 1 is required by {name}."
+            )
+        if _is_complex_input(X):
+            raise ValueError("Complex data not supported.")
+        if not reset and shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X has {shape[1]} features, but {name} is expecting "
+                f"{self.n_features_in_} features as input."
+            )
+
+    def _validate_y(self, y: Any) -> np.ndarray:
+        if y is None:
+            raise ValueError(
+                f"{type(self).__name__} requires y to be passed, but the target y is None."
+            )
+        y = column_or_1d(y, warn=True)
+        if y.dtype.kind == "f" and not np.all(np.isfinite(y)):
+            raise ValueError("Input y contains NaN or infinity; drop those rows before fitting.")
+        check_classification_targets(y)
+        return y
+
     def _ensure_engine(self) -> None:
         desired_spec = J48EngineSpec(backend=str(self.backend), fidelity=str(self.fidelity))
         current = getattr(self, "engine_", None)
@@ -106,13 +178,7 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
         fit_bundle: dict[str, Any],
         sample_weight: Optional[np.ndarray] = None,
     ) -> "J48Classifier":
-        if self.unpruned and self.reduced_error_pruning:
-            raise ValueError("unpruned=True is incompatible with reduced_error_pruning=True")
-        if int(self.min_num_obj) < 1:
-            raise ValueError("min_num_obj must be >= 1")
-        if int(self.num_folds) < 2 and self.reduced_error_pruning:
-            raise ValueError("num_folds must be >= 2 when reduced_error_pruning=True")
-
+        self._validate_params()
         self._ensure_engine()
         feature_names = fit_bundle["feature_names"]
         X_arr = fit_bundle["X"]
@@ -171,6 +237,7 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
 
     def predict(self, X: Any) -> np.ndarray:
         check_is_fitted(self, "core_estimator_")
+        self._validate_X(X, reset=False)
         X_arr = self.engine_.prepare_predict_data(X, expected_features=self.n_features_in_)
         if self.engine_.can_use_fast_hard_predict(X_arr, self.core_estimator_):
             return self.engine_.hard_predict(X_arr, self.core_estimator_)
@@ -185,6 +252,7 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
 
     def predict_proba(self, X: Any) -> np.ndarray:
         check_is_fitted(self, "core_estimator_")
+        self._validate_X(X, reset=False)
         X_arr = self.engine_.prepare_predict_data(X, expected_features=self.n_features_in_)
         if self.engine_.can_use_fast_predict_proba(X_arr, self.core_estimator_):
             return self.engine_.predict_proba_fast(X_arr, self.core_estimator_)
@@ -224,11 +292,20 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
         return self.core_estimator_
 
     def _more_tags(self) -> dict[str, Any]:
+        # Tag API for scikit-learn < 1.6.
         return {
             "allow_nan": True,
             "requires_y": True,
             "X_types": ["2darray", "string"],
         }
+
+    def __sklearn_tags__(self):
+        # Tag API for scikit-learn >= 1.6.
+        tags = super().__sklearn_tags__()
+        tags.input_tags.allow_nan = True
+        tags.input_tags.string = True
+        tags.target_tags.required = True
+        return tags
 
 
 class J48FastClassifier(J48Classifier):
