@@ -506,6 +506,11 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
         return domain
 
     def _encode_numeric_column(self, raw_col: np.ndarray) -> np.ndarray:
+        if raw_col.dtype.kind in "biuf":
+            # Vectorized equivalent of the per-value loop below.
+            out = raw_col.astype(np.float64, copy=True)
+            out[~np.isfinite(out)] = np.nan
+            return out
         out = np.empty(raw_col.shape[0], dtype=np.float64)
         obj_col = np.asarray(raw_col, dtype=object)
         for idx, value in enumerate(obj_col.tolist()):
@@ -953,9 +958,13 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
                 X_fast[:, feat] = self._encode_nominal_series_predict(X.iloc[:, feat], feat)
             return X_fast
 
-        X_fast = np.empty(X_arr.shape, dtype=np.float64)
         numeric_features = self._fast_numeric_features
+        if not self._fast_nominal_features and np.issubdtype(X_arr.dtype, np.number):
+            # All-numeric input: a float64 C-contiguous view needs no copy.
+            # Safe because prepared inputs are only read, never cached.
+            return np.ascontiguousarray(X_arr, dtype=np.float64)
 
+        X_fast = np.empty(X_arr.shape, dtype=np.float64)
         if numeric_features:
             if np.issubdtype(X_arr.dtype, np.number):
                 X_fast[:, numeric_features] = X_arr[:, numeric_features].astype(np.float64, copy=False)
