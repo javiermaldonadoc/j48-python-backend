@@ -66,6 +66,9 @@ def _is_missing_scalar(value: Any) -> bool:
     value = _to_python_scalar(value)
     if value is None:
         return True
+    # pandas missing markers (pd.NA, pd.NaT), detected without importing pandas.
+    if type(value).__name__ in ("NAType", "NaTType"):
+        return True
     if isinstance(value, str):
         return value.strip() in {"", "?"}
     if isinstance(value, (float, np.floating)):

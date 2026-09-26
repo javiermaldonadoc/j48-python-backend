@@ -138,6 +138,10 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
         self._validate_params()
         self._validate_X(X, reset=True)
         y = self._validate_y(y)
+        columns = getattr(X, "columns", None)
+        # Column names seen in fit; predict() requires the same names in the
+        # same order when it also receives a DataFrame.
+        self._fit_column_names_ = None if columns is None else [str(c) for c in columns]
 
         self.engine_ = build_engine(backend=self.backend, fidelity=self.fidelity)
         fit_bundle = self.engine_.prepare_fit_bundle(
@@ -194,6 +198,21 @@ class J48Classifier(ClassifierMixin, BaseEstimator):
                 f"X has {shape[1]} features, but {name} is expecting "
                 f"{self.n_features_in_} features as input."
             )
+        fitted_columns = getattr(self, "_fit_column_names_", None)
+        columns = getattr(X, "columns", None)
+        if not reset and fitted_columns is not None and columns is not None:
+            names = [str(c) for c in columns]
+            if names != fitted_columns:
+                mismatched = [
+                    f"position {i}: fitted {expected!r}, got {got!r}"
+                    for i, (expected, got) in enumerate(zip(fitted_columns, names))
+                    if expected != got
+                ]
+                raise ValueError(
+                    "The feature names should match those that were passed during fit "
+                    "(same names in the same order; columns are used by position). "
+                    + "; ".join(mismatched[:5])
+                )
 
     def _validate_y(self, y: Any) -> np.ndarray:
         if y is None:

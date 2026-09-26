@@ -73,6 +73,9 @@ class NumpyJ48Engine:
         value = cls._to_python_scalar(value)
         if value is None:
             return True
+        # pandas missing markers (pd.NA, pd.NaT), detected without importing pandas.
+        if type(value).__name__ in ("NAType", "NaTType"):
+            return True
         if isinstance(value, str):
             return value.strip() in {"", "?"}
         if isinstance(value, (float, np.floating)):
@@ -528,7 +531,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
         if pd is None:
             return self._encode_numeric_column(np.asarray(series))
         numeric = pd.to_numeric(series, errors="coerce")
-        return numeric.to_numpy(dtype=np.float64, copy=False)
+        return numeric.to_numpy(dtype=np.float64, na_value=np.nan)
 
     def _encode_nominal_column(
         self,
@@ -784,7 +787,7 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
             if numeric_typed_features:
                 X_fast[:, numeric_typed_features] = X.iloc[:, numeric_typed_features].to_numpy(
                     dtype=np.float64,
-                    copy=False,
+                    na_value=np.nan,
                 )
 
             resolved_domains: dict[int, list[int]] = {}
@@ -927,33 +930,33 @@ class EncodedNumpyJ48FastEngine(NumpyJ48Engine):
             numeric_features = self._fast_numeric_features
             if not nominal_set:
                 dtypes = list(X.dtypes)
-                if all(np.issubdtype(dtype, np.number) for dtype in dtypes):
-                    out = np.ascontiguousarray(X.to_numpy(dtype=np.float64, copy=False))
+                if all(pd.api.types.is_numeric_dtype(dtype) for dtype in dtypes):
+                    out = np.ascontiguousarray(X.to_numpy(dtype=np.float64, na_value=np.nan))
                     return out
                 out = np.empty((n_rows, n_cols), dtype=np.float64)
                 for feat in range(n_cols):
                     series = X.iloc[:, feat]
-                    if np.issubdtype(series.dtype, np.number):
-                        out[:, feat] = series.to_numpy(dtype=np.float64, copy=False)
+                    if pd.api.types.is_numeric_dtype(series.dtype):
+                        out[:, feat] = series.to_numpy(dtype=np.float64, na_value=np.nan)
                     else:
-                        out[:, feat] = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+                        out[:, feat] = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64, na_value=np.nan)
                 return out
             X_fast = np.empty((n_rows, n_cols), dtype=np.float64)
             if numeric_features:
                 dtypes = list(X.dtypes)
                 bulk_numeric_features = [
-                    feat for feat in numeric_features if np.issubdtype(dtypes[feat], np.number)
+                    feat for feat in numeric_features if pd.api.types.is_numeric_dtype(dtypes[feat])
                 ]
                 coerced_numeric_features = [
                     feat for feat in numeric_features if feat not in bulk_numeric_features
                 ]
                 if bulk_numeric_features:
                     X_fast[:, bulk_numeric_features] = np.ascontiguousarray(
-                        X.iloc[:, bulk_numeric_features].to_numpy(dtype=np.float64, copy=False)
+                        X.iloc[:, bulk_numeric_features].to_numpy(dtype=np.float64, na_value=np.nan)
                     )
                 for feat in coerced_numeric_features:
                     series = X.iloc[:, feat]
-                    X_fast[:, feat] = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64, copy=False)
+                    X_fast[:, feat] = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64, na_value=np.nan)
             for feat in self._fast_nominal_features:
                 X_fast[:, feat] = self._encode_nominal_series_predict(X.iloc[:, feat], feat)
             return X_fast
